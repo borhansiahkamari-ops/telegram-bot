@@ -4,10 +4,44 @@ import sqlite3
 import threading
 import secrets
 import time
+import os
 from datetime import datetime, timedelta
 
 import telebot
 from telebot import types
+from flask import Flask
+
+# =========================
+# Flask Keep-Alive / Health Server
+# =========================
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running!", 200
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
+def run_flask():
+    # Hosting services such as Render/Railway normally provide PORT.
+    # 8000 is used locally if PORT is not defined.
+    try:
+        port = int(os.environ.get("PORT", "8000"))
+    except (TypeError, ValueError):
+        port = 8000
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False,
+        threaded=True
+    )
+
+
 
 
 # =========================
@@ -1392,112 +1426,43 @@ def subscription_checker():
 
         time.sleep(60)
 
+
 # =========================
 # اجرای برنامه
 # =========================
 
-import os
-import time
-import threading
-import telebot
-from flask import Flask
-from datetime import datetime
-import sqlite3
-
-# ===== وباپ برای پورت (Render و محیطهای دیگر) =====
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "ربات فعال است"
-
-PORT = int(os.environ.get("PORT", 8000))
-
-def run_web_server():
-    app.run(host="0.0.0.0", port=PORT)
-
-# ===== تنظیمات ربات =====
-TOKEN = os.environ.get("BOT_TOKEN", "")
-bot = telebot.TeleBot(TOKEN)
-
-# ===== تابع دیتابیس =====
-def execute(query, params=(), fetchall=False):
-    conn = sqlite3.connect("data.db")
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute(query, params)
-    if fetchall:
-        result = cursor.fetchall()
-    else:
-        result = cursor.fetchone()
-    conn.commit()
-    conn.close()
-    return result
-
-def init_database():
-    # اینجا کد ساخت جدولها (schema) رو بذار
-    execute(
-        """
-        CREATE TABLE IF NOT EXISTS admins (
-            id INTEGER PRIMARY KEY,
-            expire_at TEXT
-        )
-        """
-    )
-    print("دیتابیس راهاندازی شد.")
-
-def subscription_checker():
-    while True:
-        try:
-            admins = execute(
-                "SELECT * FROM admins WHERE status = 'active'",
-                fetchall=True
-            )
-            current_time = datetime.now()
-
-            for admin in admins:
-                try:
-                    expire_at = datetime.strptime(
-                        admin["expire_at"],
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                    if expire_at <= current_time:
-                        execute(
-                            "UPDATE admins SET status = 'expired' WHERE id = ?",
-                            (admin["id"],)
-                        )
-                        print(f"اشتراک {admin['id']} منقضی شد")
-                except Exception as e:
-                    print(f"خطا برای ادمین {admin['id']}:", e)
-
-        except Exception as e:
-            print("خطا در چک اشتراک:", e)
-
-        time.sleep(60)
-
-# ===== اجرای اصلی =====
-def main():
-    init_database()
-
-    # وباپ در پسزمینه
-    threading.Thread(target=run_web_server, daemon=True).start()
-
-    # چککننده اشتراک در پسزمینه
-    threading.Thread(target=subscription_checker, daemon=True).start()
-
-    print("ربات با موفقیت اجرا شد.")
-
-    # حلقه اصلی polling
-    while True:
-        try:
-            bot.infinity_polling(
-                skip_pending=True,
-                timeout=60,
-                long_polling_timeout=60
-            )
-        except Exception as error:
-            print("خطای polling:", error)
-            time.sleep(5)
 
 if __name__ == "__main__":
-    main()
+    # ساخت/آماده‌سازی دیتابیس
+    init_database()
+
+    # اجرای Flask در Thread جداگانه تا با Telegram polling تداخل نداشته باشد
+    flask_thread = threading.Thread(
+        target=run_flask,
+        daemon=True,
+        name="flask-server"
+    )
+    flask_thread.start()
+
+    # بررسی دوره‌ای اشتراک‌ها
+    checker_thread = threading.Thread(
+        target=subscription_checker,
+        daemon=True,
+        name="subscription-checker"
+    )
+    checker_thread.start()
+
+    print("ربات با موفقیت اجرا شد.")
+    print("Flask health server نیز در پس‌زمینه اجرا شد.")
+
+    # Telegram polling
+    while True:
+        try:
+            bot.infinity_polling(
+                skip_pending=True,
+                timeout=60,
+                long_polling_timeout=60
+            )
+        except Exception as error:
+            print("خطای polling:", error)
+            time.sleep(5)
