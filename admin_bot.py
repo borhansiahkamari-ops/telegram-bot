@@ -7,7 +7,7 @@ import logging
 # CONFIG
 # ==========================
 
-TOKEN = "8991333895:AAFuSkby-1uccGcGeOhpuk088URI4GIqoZo"
+TOKEN = "8991333895:AAFy4MfYHQj8p1l8Zo9iwpn_OzwRzaaKEfM"
 ADMIN_ID = 6914909647
 
 MUTE_DURATION = 60
