@@ -1392,67 +1392,112 @@ def subscription_checker():
 
         time.sleep(60)
 
-
 # =========================
 # اجرای برنامه
 # =========================
 
-# ===== وارد کردن کتابخانهها =====
 import os
 import time
 import threading
 import telebot
 from flask import Flask
+from datetime import datetime
+import sqlite3
 
-# ===== وباپ برای Render (پورت) =====
+# ===== وباپ برای پورت (Render و محیطهای دیگر) =====
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ربات فعال است"
+    return "ربات فعال است"
 
-port = int(os.environ.get("PORT", 8000))
-threading.Thread(
-    target=lambda: app.run(host="0.0.0.0", port=port),
-    daemon=True
-).start()
+PORT = int(os.environ.get("PORT", 8000))
+
+def run_web_server():
+    app.run(host="0.0.0.0", port=PORT)
 
 # ===== تنظیمات ربات =====
 TOKEN = os.environ.get("BOT_TOKEN", "")
 bot = telebot.TeleBot(TOKEN)
 
-# ===== تابعها =====
+# ===== تابع دیتابیس =====
+def execute(query, params=(), fetchall=False):
+    conn = sqlite3.connect("data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+    if fetchall:
+        result = cursor.fetchall()
+    else:
+        result = cursor.fetchone()
+    conn.commit()
+    conn.close()
+    return result
+
 def init_database():
-    # اینجا کد دیتابیست رو بذار
-    print("دیتابیس راهاندازی شد.")
+    # اینجا کد ساخت جدولها (schema) رو بذار
+    execute(
+        """
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY,
+            expire_at TEXT
+        )
+        """
+    )
+    print("دیتابیس راهاندازی شد.")
 
 def subscription_checker():
-    while True:
-        # اینجا چک وضعیت سابسکریپشن
-        time.sleep(60)
+    while True:
+        try:
+            admins = execute(
+                "SELECT * FROM admins WHERE status = 'active'",
+                fetchall=True
+            )
+            current_time = datetime.now()
+
+            for admin in admins:
+                try:
+                    expire_at = datetime.strptime(
+                        admin["expire_at"],
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    if expire_at <= current_time:
+                        execute(
+                            "UPDATE admins SET status = 'expired' WHERE id = ?",
+                            (admin["id"],)
+                        )
+                        print(f"اشتراک {admin['id']} منقضی شد")
+                except Exception as e:
+                    print(f"خطا برای ادمین {admin['id']}:", e)
+
+        except Exception as e:
+            print("خطا در چک اشتراک:", e)
+
+        time.sleep(60)
 
 # ===== اجرای اصلی =====
 def main():
-    init_database()
+    init_database()
 
-    checker_thread = threading.Thread(
-        target=subscription_checker,
-        daemon=True
-    )
-    checker_thread.start()
+    # وباپ در پسزمینه
+    threading.Thread(target=run_web_server, daemon=True).start()
 
-    print("ربات با موفقیت اجرا شد.")
+    # چککننده اشتراک در پسزمینه
+    threading.Thread(target=subscription_checker, daemon=True).start()
 
-    while True:
-        try:
-            bot.infinity_polling(
-                skip_pending=True,
-                timeout=60,
-                long_polling_timeout=60
-            )
-        except Exception as error:
-            print("خطا در polling:", error)
-            time.sleep(5)
+    print("ربات با موفقیت اجرا شد.")
+
+    # حلقه اصلی polling
+    while True:
+        try:
+            bot.infinity_polling(
+                skip_pending=True,
+                timeout=60,
+                long_polling_timeout=60
+            )
+        except Exception as error:
+            print("خطای polling:", error)
+            time.sleep(5)
 
 if __name__ == "__main__":
-    main()
+    main()
