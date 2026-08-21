@@ -48,7 +48,7 @@ def run_flask():
 # تنظیمات اصلی
 # =========================
 
-BOT_TOKEN = "8915241769:AAEjtj6-CE-bwUKxA7CLbfWd2FMv74nn0Ho"
+BOT_TOKEN = "8915241769:AAGPPYUfe-Y882RiDAUqLGJhZ0JJFKsgIdk"
 
 OWNER_ID = 6914909647
 
