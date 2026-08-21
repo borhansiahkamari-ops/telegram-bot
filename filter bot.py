@@ -4,10 +4,44 @@ import sqlite3
 import threading
 import secrets
 import time
+import os
 from datetime import datetime, timedelta
 
 import telebot
 from telebot import types
+from flask import Flask
+
+# =========================
+# Flask Keep-Alive / Health Server
+# =========================
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running!", 200
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
+def run_flask():
+    # Hosting services such as Render/Railway normally provide PORT.
+    # 8000 is used locally if PORT is not defined.
+    try:
+        port = int(os.environ.get("PORT", "8000"))
+    except (TypeError, ValueError):
+        port = 8000
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False,
+        threaded=True
+    )
+
+
 
 
 # =========================
@@ -1397,17 +1431,31 @@ def subscription_checker():
 # اجرای برنامه
 # =========================
 
+
 if __name__ == "__main__":
+    # ساخت/آماده‌سازی دیتابیس
     init_database()
 
+    # اجرای Flask در Thread جداگانه تا با Telegram polling تداخل نداشته باشد
+    flask_thread = threading.Thread(
+        target=run_flask,
+        daemon=True,
+        name="flask-server"
+    )
+    flask_thread.start()
+
+    # بررسی دوره‌ای اشتراک‌ها
     checker_thread = threading.Thread(
         target=subscription_checker,
-        daemon=True
+        daemon=True,
+        name="subscription-checker"
     )
     checker_thread.start()
 
     print("ربات با موفقیت اجرا شد.")
+    print("Flask health server نیز در پس‌زمینه اجرا شد.")
 
+    # Telegram polling
     while True:
         try:
             bot.infinity_polling(
