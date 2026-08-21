@@ -1397,7 +1397,42 @@ def subscription_checker():
 # اجرای برنامه
 # =========================
 
-if __name__ == "__main__":
+# ===== وارد کردن کتابخانهها =====
+import os
+import time
+import threading
+import telebot
+from flask import Flask
+
+# ===== وباپ برای Render (پورت) =====
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "ربات فعال است"
+
+port = int(os.environ.get("PORT", 8000))
+threading.Thread(
+    target=lambda: app.run(host="0.0.0.0", port=port),
+    daemon=True
+).start()
+
+# ===== تنظیمات ربات =====
+TOKEN = os.environ.get("BOT_TOKEN", "")
+bot = telebot.TeleBot(TOKEN)
+
+# ===== تابعها =====
+def init_database():
+    # اینجا کد دیتابیست رو بذار
+    print("دیتابیس راهاندازی شد.")
+
+def subscription_checker():
+    while True:
+        # اینجا چک وضعیت سابسکریپشن
+        time.sleep(60)
+
+# ===== اجرای اصلی =====
+def main():
     init_database()
 
     checker_thread = threading.Thread(
@@ -1416,5 +1451,8 @@ if __name__ == "__main__":
                 long_polling_timeout=60
             )
         except Exception as error:
-            print("خطای polling:", error)
+            print("خطا در polling:", error)
             time.sleep(5)
+
+if __name__ == "__main__":
+    main()
