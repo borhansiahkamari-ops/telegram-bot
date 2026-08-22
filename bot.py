@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 import telebot
 from telebot import types
-from flask import Flask
+from flask import Flask, request
 
 # =========================
 # Flask Keep-Alive / Health Server
@@ -25,6 +25,66 @@ def home():
 @app.route("/health")
 def health():
     return "OK", 200
+
+
+# =========================
+# Telegram Webhook
+# =========================
+# Render Free services sleep after inactivity. Telegram polling cannot wake
+# a sleeping Render service because polling requires the Python process to
+# already be running. Webhook mode fixes this: Telegram sends the user's
+# update as an HTTP request, which wakes the Render Web Service.
+WEBHOOK_PATH = "/telegram-webhook"
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
+
+
+@app.route(WEBHOOK_PATH, methods=["POST"])
+def telegram_webhook():
+    if WEBHOOK_SECRET:
+        incoming_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if incoming_secret != WEBHOOK_SECRET:
+            return "Forbidden", 403
+
+    try:
+        if not request.is_json:
+            return "Bad Request", 400
+
+        update = telebot.types.Update.de_json(request.get_json())
+        bot.process_new_updates([update])
+        return "OK", 200
+    except Exception as error:
+        print("خطای webhook:", error)
+        return "OK", 200
+
+
+def setup_telegram_webhook():
+    """
+    Configure Telegram to deliver updates to this Render Web Service.
+    On Render, RENDER_EXTERNAL_URL is provided automatically.
+    WEBHOOK_URL can be set manually when running somewhere else.
+    """
+    if not WEBHOOK_URL:
+        print("WEBHOOK_URL/RENDER_EXTERNAL_URL پیدا نشد؛ webhook فعال نشد.")
+        return False
+
+    try:
+        bot.remove_webhook()
+        time.sleep(0.2)
+
+        kwargs = {}
+        if WEBHOOK_SECRET:
+            kwargs["secret_token"] = WEBHOOK_SECRET
+
+        full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
+        bot.set_webhook(url=full_url, **kwargs)
+
+        print("Telegram webhook فعال شد:", full_url)
+        return True
+    except Exception as error:
+        print("خطا در فعال‌سازی Telegram webhook:", error)
+        return False
+
 
 def run_flask():
     # Hosting services such as Render/Railway normally provide PORT.
@@ -1455,14 +1515,11 @@ if __name__ == "__main__":
     print("ربات با موفقیت اجرا شد.")
     print("Flask health server نیز در پس‌زمینه اجرا شد.")
 
-    # Telegram polling
+    # Telegram webhook
+    # Telegram sends every new update to the Flask endpoint above.
+    # This lets a sleeping Render Free Web Service wake up on demand.
+    setup_telegram_webhook()
+
+    # Keep the main process alive while Flask handles webhook requests.
     while True:
-        try:
-            bot.infinity_polling(
-                skip_pending=True,
-                timeout=60,
-                long_polling_timeout=60
-            )
-        except Exception as error:
-            print("خطای polling:", error)
-            time.sleep(5)
+        time.sleep(3600)
