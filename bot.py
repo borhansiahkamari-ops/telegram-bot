@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import threading
 import secrets
 import time
@@ -48,9 +49,11 @@ def run_flask():
 # تنظیمات اصلی
 # =========================
 
-BOT_TOKEN = "8915241769:AAGPPYUfe-Y882RiDAUqLGJhZ0JJFKsgIdk"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is required.")
 
-OWNER_ID = 6914909647
+OWNER_ID = int(os.environ.get("OWNER_ID", "6914909647"))
 
 DEFAULT_DELETE_AFTER = 17
 
@@ -63,115 +66,111 @@ DEFAULT_SUB_DAYS = 30
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-DB_NAME = "file_sharing_bot.db"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL environment variable is required.")
 
 db_lock = threading.RLock()
 
 user_states = {}
-
 pending_downloads = {}
-
 
 def now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-
 def date_text(date_obj):
     return date_obj.strftime("%Y-%m-%d %H:%M:%S")
 
-
 def get_db():
-    connection = sqlite3.connect(
-        DB_NAME,
-        check_same_thread=False,
-        timeout=30
-    )
-    connection.row_factory = sqlite3.Row
-    return connection
-
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def execute(query, params=(), fetchone=False, fetchall=False, commit=False):
+    # SQLite '?' placeholders are converted to PostgreSQL '%s'.
+    query = query.replace("?", "%s")
     with db_lock:
         connection = get_db()
+        cursor = connection.cursor(cursor_factory=RealDictCursor)
         try:
-            cursor = connection.cursor()
             cursor.execute(query, params)
-
+            if fetchone:
+                result = cursor.fetchone()
+            elif fetchall:
+                result = cursor.fetchall()
+            else:
+                result = None
+                if cursor.description:
+                    row = cursor.fetchone()
+                    result = row["id"] if row and "id" in row else None
             if commit:
                 connection.commit()
-
-            if fetchone:
-                return cursor.fetchone()
-
-            if fetchall:
-                return cursor.fetchall()
-
-            return cursor.lastrowid
-
+            return result
+        except Exception:
+            connection.rollback()
+            raise
         finally:
+            cursor.close()
             connection.close()
-
 
 def init_database():
     with db_lock:
         connection = get_db()
         cursor = connection.cursor()
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admins (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER UNIQUE NOT NULL,
-                name TEXT,
-                created_at TEXT NOT NULL,
-                expire_at TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active'
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                admin_id INTEGER NOT NULL,
-                file_id TEXT NOT NULL,
-                file_name TEXT,
-                file_type TEXT NOT NULL,
-                caption TEXT,
-                token TEXT UNIQUE NOT NULL,
-                downloads INTEGER NOT NULL DEFAULT 0,
-                upload_date TEXT NOT NULL,
-                deleted INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS channels (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                admin_id INTEGER NOT NULL,
-                channel_id TEXT NOT NULL,
-                channel_username TEXT,
-                channel_link TEXT
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS downloads (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                username TEXT,
-                timestamp TEXT NOT NULL
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                admin_id INTEGER PRIMARY KEY,
-                delete_after INTEGER NOT NULL DEFAULT 60
-            )
-        """)
-
-        connection.commit()
-        connection.close()
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS admins (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT UNIQUE NOT NULL,
+                    name TEXT,
+                    created_at TEXT NOT NULL,
+                    expire_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active'
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS files (
+                    id BIGSERIAL PRIMARY KEY,
+                    admin_id BIGINT NOT NULL,
+                    file_id TEXT NOT NULL,
+                    file_name TEXT,
+                    file_type TEXT NOT NULL,
+                    caption TEXT,
+                    token TEXT UNIQUE NOT NULL,
+                    downloads INTEGER NOT NULL DEFAULT 0,
+                    upload_date TEXT NOT NULL,
+                    deleted INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS channels (
+                    id BIGSERIAL PRIMARY KEY,
+                    admin_id BIGINT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    channel_username TEXT,
+                    channel_link TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS downloads (
+                    id BIGSERIAL PRIMARY KEY,
+                    file_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    timestamp TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    admin_id BIGINT PRIMARY KEY,
+                    delete_after INTEGER NOT NULL DEFAULT 60
+                )
+            """)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
 
 
 # =========================
@@ -653,6 +652,7 @@ def upload_handler(message):
         INSERT INTO files
         (admin_id, file_id, file_name, file_type, caption, token, upload_date)
         VALUES (?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
         """,
         (
             user_id,
@@ -1053,7 +1053,7 @@ def process_state(message, state):
                 INSERT INTO settings (admin_id, delete_after)
                 VALUES (?, ?)
                 ON CONFLICT(admin_id)
-                DO UPDATE SET delete_after = excluded.delete_after
+                DO UPDATE SET delete_after = EXCLUDED.delete_after
                 """,
                 (user_id, seconds),
                 commit=True
