@@ -18,13 +18,10 @@ ADMIN_ID = 6914909647
 # قیمت را اینجا تغییر بده.
 # Telegram برای خدمات دیجیتال از Telegram Stars (XTR) استفاده می‌کند.
 # 250 Stars را به‌عنوان قیمت تقریبی پلن 5 دلاری تنظیم کرده‌ایم.
-STAR_PRICE = int(os.getenv("STAR_PRICE", "250"))
+STAR_PRICE = 250
 
 # مدت اشتراک: 30 روز
 SUBSCRIPTION_SECONDS = 30 * 24 * 60 * 60
-
-if not TOKEN or TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
-    raise RuntimeError("BOT_TOKEN is not set in Render Environment Variables.")
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -111,8 +108,6 @@ def save_user(user_id, language=None, subscription_until=None, charge_id=None):
             json=data,
             timeout=10
         )
-        if not response.ok:
-            print("Supabase save error:", response.status_code, response.text)
         return response.ok
 
     except Exception as e:
@@ -358,28 +353,6 @@ def welcome(m):
     )
 
 
-@bot.message_handler(commands=["help"])
-def help_command(m):
-    language = get_language(m.from_user.id)
-    if language == "fa":
-        text = (
-            "📌 راهنما\n\n"
-            "/start - شروع ربات\n"
-            "/subscribe - خرید/فعال‌سازی اشتراک\n"
-            "/status - وضعیت اشتراک\n"
-            "/language - تغییر زبان"
-        )
-    else:
-        text = (
-            "📌 Help\n\n"
-            "/start - Start the bot\n"
-            "/subscribe - Buy/activate subscription\n"
-            "/status - Check subscription\n"
-            "/language - Change language"
-        )
-    bot.send_message(m.chat.id, text, reply_markup=main_keyboard(language))
-
-
 @bot.message_handler(commands=["language"])
 def change_language_command(m):
     bot.send_message(
@@ -540,6 +513,44 @@ def check_id(m):
     else:
         bot.reply_to(m, f"Your code: {user_id}")
 
+
+# =========================
+# Render Web Service
+# =========================
+# Render Web Service باید حداقل روی یک پورت HTTP گوش بدهد.
+# این سرور سبک فقط برای Health Check و Port Binding است
+# و منطق اصلی ربات را تغییر نمی‌دهد.
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
+
+PORT = int(os.getenv("PORT", "10000"))
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/", "/health", "/healthz"):
+            body = b"OK"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        # لاگ‌های اضافی Health Check را نمایش نده.
+        return
+
+
+def start_health_server():
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
+    print(f"Health server is running on port {PORT}...")
+    server.serve_forever()
+
+
+threading.Thread(target=start_health_server, daemon=True).start()
 
 print("bot is on...")
 bot.infinity_polling()
