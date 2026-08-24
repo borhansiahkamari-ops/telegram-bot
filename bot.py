@@ -328,41 +328,38 @@ def get_active_admin(user_id):
 def admin_keyboard(user_id=None):
     user_id = user_id if user_id is not None else OWNER_ID
     if get_language(user_id) == "en":
-        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        keyboard.row("💳 Subscription status", "💎 Buy / Renew")
         keyboard.row("📤 Upload file", "📂 My files")
-        keyboard.row("📊 My stats", "📢 Manage channels")
-        keyboard.row("💳 Subscription status", "💎 Buy / Renew subscription")
-        keyboard.row("🌐 Language")
-        keyboard.row("❌ Close panel")
+        keyboard.row("📊 My statistics", "📢 Mandatory channels")
+        keyboard.row("🌐 Language", "❌ Close panel")
         return keyboard
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    keyboard.row("💳 وضعیت اشتراک", "💎 خرید / تمدید")
     keyboard.row("📤 آپلود فایل", "📂 فایل‌های من")
-    keyboard.row("📊 آمار من", "📢 مدیریت کانال‌ها")
-    keyboard.row("💳 وضعیت اشتراک", "💎 تمدید / خرید اشتراک")
-    keyboard.row("🌐 زبان / Language")
-    keyboard.row("❌ بستن پنل")
+    keyboard.row("📊 آمار من", "📢 کانال‌های اجباری")
+    keyboard.row("🌐 زبان", "❌ بستن پنل")
     return keyboard
+
+
 def owner_keyboard(user_id=None):
     user_id = user_id if user_id is not None else OWNER_ID
     if get_language(user_id) == "en":
-        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        keyboard.row("👥 Manage admins", "➕ Add admin")
-        keyboard.row("➖ Remove admin", "💰 Revenue")
-        keyboard.row("📊 Global stats", "📂 All files")
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        keyboard.row("📊 Global statistics", "👥 Manage admins")
         keyboard.row("💎 Subscription plans", "📢 All channels")
+        keyboard.row("📂 All files", "💰 Revenue")
         keyboard.row("⏱ Auto-delete settings")
-        keyboard.row("🌐 Language")
-        keyboard.row("❌ Close panel")
+        keyboard.row("🌐 Language", "❌ Close panel")
         return keyboard
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row("👥 مدیریت ادمین‌ها", "➕ افزودن ادمین")
-    keyboard.row("➖ حذف ادمین", "💰 درآمد")
-    keyboard.row("📊 آمار کل", "📂 همه فایل‌ها")
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    keyboard.row("📊 آمار کل", "👥 مدیریت ادمین‌ها")
     keyboard.row("💎 مدیریت اشتراک‌ها", "📢 همه کانال‌ها")
+    keyboard.row("📂 همه فایل‌ها", "💰 درآمد")
     keyboard.row("⏱ تنظیم حذف خودکار")
-    keyboard.row("🌐 زبان / Language")
-    keyboard.row("❌ بستن پنل")
+    keyboard.row("🌐 زبان", "❌ بستن پنل")
     return keyboard
+
 def inline_button(text, callback_data):
     keyboard = types.InlineKeyboardMarkup()
     keyboard.add(types.InlineKeyboardButton(text, callback_data=callback_data))
@@ -387,60 +384,80 @@ def safe_send(chat_id, text, **kwargs):
 
 LANG = {
     "fa": {
-        "language": "🌐 زبان انتخاب شد: فارسی",
-        "choose_language": "🌐 زبان را انتخاب کنید / Choose your language:",
-        "welcome": "سلام! 👋\nاین ربات برای دریافت فایل استفاده می‌شود.",
+        "language": "🌐 زبان با موفقیت روی فارسی تنظیم شد.",
+        "choose_language": "🌐 زبان ربات را انتخاب کنید:",
+        "welcome": "سلام! 👋\nبه ربات دریافت فایل خوش آمدید.",
         "buy": "💎 خرید / تمدید اشتراک",
-        "no_plans": "فعلاً هیچ پلن فعالی وجود ندارد.",
-        "plans": "💎 پلن‌های اشتراک:",
-        "payment_sent": "🧾 فاکتور پرداخت در تلگرام برای شما ارسال شد.",
-        "payment_ok": "✅ پرداخت با موفقیت انجام شد و اشتراک شما فعال/تمدید شد.",
-        "payment_error": "❌ پرداخت ثبت نشد یا اطلاعات پرداخت نامعتبر است.",
-        "owner_only": "⛔ فقط مالک به این بخش دسترسی دارد.",
-        "admin_only": "⛔ شما دسترسی ادمین ندارید.",
-        "owner_plans": "💎 مدیریت پلن‌های اشتراک",
+        "no_plans": "💎 در حال حاضر هیچ پلن فعالی برای خرید وجود ندارد.",
+        "plans": "💎 پلن‌های اشتراک\n\nیکی از پلن‌های زیر را برای فعال‌سازی یا تمدید انتخاب کنید:",
+        "payment_sent": "🧾 فاکتور پرداخت از طریق Telegram Stars برای شما ارسال شد.",
+        "payment_ok": "✅ پرداخت با موفقیت انجام شد. اشتراک شما فعال یا تمدید شد.",
+        "payment_error": "❌ پرداخت انجام نشد یا قابل تأیید نبود. لطفاً دوباره تلاش کنید.",
+        "owner_only": "⛔ این بخش فقط برای مالک ربات قابل دسترسی است.",
+        "admin_only": "⛔ شما دسترسی ادمین ندارید یا اشتراک شما فعال نیست.",
+        "owner_plans": "💎 مدیریت اشتراک‌ها\n\nاز این بخش می‌توانید پلن‌ها را ایجاد، ویرایش، فعال/غیرفعال یا حذف کنید.",
         "add_plan": "➕ افزودن پلن",
+        "edit_plan": "✏️ ویرایش پلن",
         "remove_plan": "🗑 حذف پلن",
-        "owner_channels": "📢 همه کانال‌های اجباری",
+        "toggle_plan": "🔄 فعال / غیرفعال کردن",
+        "owner_channels": "📢 مدیریت همه کانال‌های اجباری",
         "owner_delete": "⏱ تنظیم حذف خودکار برای ادمین",
         "send_admin_id": "🆔 آیدی عددی ادمین را ارسال کنید.",
         "send_seconds": "⏱ زمان حذف خودکار را به ثانیه ارسال کنید.",
-        "plan_format": "فرمت: نام فارسی | نام انگلیسی | تعداد روز | تعداد ستاره | recurring\nمثال: 30 روزه | 30 Days | 30 | 250 | yes",
-        "plan_added": "✅ پلن با موفقیت اضافه شد.",
-        "plan_deleted": "✅ پلن حذف شد.",
-        "invalid_plan": "❌ اطلاعات پلن نامعتبر است.",
-        "invalid_seconds": "❌ فقط عدد مثبت ارسال کنید.",
+        "plan_format": "فرمت افزودن پلن:\nنام فارسی | نام انگلیسی | تعداد روز | تعداد ستاره | recurring\n\nمثال:\n30 روزه | 30 Days | 30 | 250 | yes\n\nبرای اشتراک دوره‌ای، تعداد روز باید 30 باشد.",
+        "plan_added": "✅ پلن با موفقیت ایجاد شد.",
+        "plan_updated": "✅ پلن با موفقیت ویرایش شد.",
+        "plan_deleted": "✅ پلن غیرفعال شد.",
+        "plan_toggled": "✅ وضعیت پلن تغییر کرد.",
+        "invalid_plan": "❌ اطلاعات پلن نامعتبر است. همه فیلدها را با | جدا کنید.",
+        "invalid_seconds": "❌ فقط یک عدد مثبت بر حسب ثانیه ارسال کنید.",
         "delete_set": "✅ زمان حذف خودکار ادمین تنظیم شد.",
         "no_channels": "هیچ کانال اجباری ثبت نشده است.",
-        "channel_removed": "✅ کانال حذف شد.",
+        "channel_removed": "✅ کانال با موفقیت حذف شد.",
+        "subscription_status": "💳 وضعیت اشتراک",
+        "active": "فعال",
+        "inactive": "غیرفعال",
+        "expires": "تاریخ پایان",
+        "days_left": "روز باقی‌مانده",
+        "stars": "ستاره",
     },
     "en": {
-        "language": "🌐 Language selected: English",
-        "choose_language": "🌐 زبان را انتخاب کنید / Choose your language:",
-        "welcome": "Hello! 👋\nThis bot is used to receive files.",
+        "language": "🌐 Language has been set to English.",
+        "choose_language": "🌐 Choose your preferred language:",
+        "welcome": "Hello! 👋\nWelcome to the file delivery bot.",
         "buy": "💎 Buy / Renew subscription",
-        "no_plans": "There are no active plans at the moment.",
-        "plans": "💎 Subscription plans:",
-        "payment_sent": "🧾 The payment invoice was sent inside Telegram.",
-        "payment_ok": "✅ Payment completed and your subscription was activated/extended.",
-        "payment_error": "❌ Payment could not be registered.",
-        "owner_only": "⛔ Owner access only.",
-        "admin_only": "⛔ You do not have admin access.",
-        "owner_plans": "💎 Subscription plan management",
+        "no_plans": "💎 There are currently no active subscription plans available.",
+        "plans": "💎 Subscription plans\n\nChoose a plan below to activate or extend your subscription:",
+        "payment_sent": "🧾 Your Telegram Stars payment invoice has been sent.",
+        "payment_ok": "✅ Payment completed successfully. Your subscription is now active or extended.",
+        "payment_error": "❌ The payment could not be completed or verified. Please try again.",
+        "owner_only": "⛔ This section is available to the bot owner only.",
+        "admin_only": "⛔ You do not have admin access or your subscription is inactive.",
+        "owner_plans": "💎 Subscription Management\n\nCreate, edit, enable, disable, or remove subscription plans from this section.",
         "add_plan": "➕ Add plan",
-        "remove_plan": "🗑 Delete plan",
-        "owner_channels": "📢 All mandatory channels",
-        "owner_delete": "⏱ Set auto-delete for an admin",
-        "send_admin_id": "🆔 Send the admin's numeric ID.",
-        "send_seconds": "⏱ Send auto-delete time in seconds.",
-        "plan_format": "Format: Persian name | English name | days | stars | recurring\nExample: 30 روزه | 30 Days | 30 | 250 | yes",
-        "plan_added": "✅ Plan added successfully.",
-        "plan_deleted": "✅ Plan deleted.",
-        "invalid_plan": "❌ Invalid plan information.",
-        "invalid_seconds": "❌ Send a positive number only.",
-        "delete_set": "✅ Admin auto-delete time updated.",
+        "edit_plan": "✏️ Edit plan",
+        "remove_plan": "🗑 Remove plan",
+        "toggle_plan": "🔄 Enable / Disable",
+        "owner_channels": "📢 Manage all mandatory channels",
+        "owner_delete": "⏱ Configure admin auto-delete",
+        "send_admin_id": "🆔 Send the admin's numeric Telegram ID.",
+        "send_seconds": "⏱ Send the auto-delete delay in seconds.",
+        "plan_format": "Plan format:\nPersian name | English name | days | Stars | recurring\n\nExample:\n30 روزه | 30 Days | 30 | 250 | yes\n\nRecurring Telegram Stars subscriptions must be 30 days.",
+        "plan_added": "✅ Plan created successfully.",
+        "plan_updated": "✅ Plan updated successfully.",
+        "plan_deleted": "✅ Plan disabled successfully.",
+        "plan_toggled": "✅ Plan status updated.",
+        "invalid_plan": "❌ Invalid plan data. Separate every field with |.",
+        "invalid_seconds": "❌ Send a positive number of seconds only.",
+        "delete_set": "✅ Admin auto-delete delay updated.",
         "no_channels": "No mandatory channels are registered.",
-        "channel_removed": "✅ Channel removed.",
+        "channel_removed": "✅ Channel removed successfully.",
+        "subscription_status": "💳 Subscription status",
+        "active": "Active",
+        "inactive": "Inactive",
+        "expires": "Expires",
+        "days_left": "Days remaining",
+        "stars": "Stars",
     }
 }
 
@@ -469,23 +486,32 @@ def language_keyboard():
 
 def plans_keyboard(user_id, owner=False):
     plans = execute(
-        "SELECT * FROM subscription_plans WHERE active = TRUE ORDER BY days, stars",
+        "SELECT * FROM subscription_plans ORDER BY active DESC, days, stars",
         fetchall=True
     )
-    kb = types.InlineKeyboardMarkup()
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    lang = get_language(user_id)
     for plan in plans:
-        name = plan["name_fa"] if get_language(user_id) == "fa" else plan["name_en"]
+        name = plan["name_fa"] if lang == "fa" else plan["name_en"]
+        status = "🟢" if plan["active"] else "⚪"
         recurring = " 🔄" if plan["recurring"] else ""
-        kb.add(types.InlineKeyboardButton(
-            f"{name} — {plan['days']}d / ⭐{plan['stars']}{recurring}",
-            callback_data=f"buy_plan:{plan['id']}"
-        ))
+        if owner:
+            label = f"{status} {name} • {plan['days']} days • ⭐{plan['stars']}{recurring}"
+            kb.add(types.InlineKeyboardButton(label, callback_data=f"plan_manage:{plan['id']}"))
+        elif plan["active"]:
+            label = f"💎 {name} • {plan['days']} days • ⭐{plan['stars']}{recurring}"
+            kb.add(types.InlineKeyboardButton(label, callback_data=f"buy_plan:{plan['id']}"))
     if owner:
         kb.row(
-            types.InlineKeyboardButton("➕ افزودن پلن", callback_data="owner_add_plan"),
-            types.InlineKeyboardButton("🗑 حذف پلن", callback_data="owner_delete_plan")
+            types.InlineKeyboardButton("➕ افزودن پلن" if lang == "fa" else "➕ Add plan", callback_data="owner_add_plan"),
+            types.InlineKeyboardButton("🔄 مدیریت وضعیت" if lang == "fa" else "🔄 Status", callback_data="owner_toggle_plan")
         )
+        kb.row(types.InlineKeyboardButton("✏️ ویرایش پلن‌ها" if lang == "fa" else "✏️ Edit plans", callback_data="owner_edit_plan"))
     return kb
+
+
+def subscription_management_keyboard(user_id):
+    return plans_keyboard(user_id, owner=True)
 
 def ensure_default_plan():
     count = execute("SELECT COUNT(*) AS total FROM subscription_plans", fetchone=True)
@@ -642,6 +668,86 @@ def successful_payment_handler(message):
     except Exception as error:
         print("خطای ثبت پرداخت:", error)
         bot.send_message(user_id, tr(user_id, "payment_error"))
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("plan_manage:"))
+def plan_manage_callback(call):
+    user_id = call.from_user.id
+    if not is_owner(user_id):
+        bot.answer_callback_query(call.id, tr(user_id, "owner_only"), show_alert=True)
+        return
+    try:
+        plan_id = int(call.data.split(":", 1)[1])
+    except ValueError:
+        bot.answer_callback_query(call.id, tr(user_id, "invalid_plan"), show_alert=True)
+        return
+    plan = execute("SELECT * FROM subscription_plans WHERE id=?", (plan_id,), fetchone=True)
+    if not plan:
+        bot.answer_callback_query(call.id, tr(user_id, "invalid_plan"), show_alert=True)
+        return
+    lang = get_language(user_id)
+    name = plan["name_fa"] if lang == "fa" else plan["name_en"]
+    status = ("فعال" if plan["active"] else "غیرفعال") if lang == "fa" else ("Active" if plan["active"] else "Inactive")
+    recurring = (("بله" if plan["recurring"] else "خیر") if lang == "fa" else ("Yes" if plan["recurring"] else "No"))
+    text = (f"💎 {name}\n\n📌 Status: {status}\n📅 Days: {plan['days']}\n⭐ Stars: {plan['stars']}\n🔄 Recurring: {recurring}")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.row(
+        types.InlineKeyboardButton("✏️ ویرایش" if lang == "fa" else "✏️ Edit", callback_data=f"edit_plan:{plan_id}"),
+        types.InlineKeyboardButton("🔄 وضعیت" if lang == "fa" else "🔄 Toggle", callback_data=f"toggle_plan:{plan_id}")
+    )
+    kb.add(types.InlineKeyboardButton("🗑 غیرفعال کردن" if lang == "fa" else "🗑 Disable", callback_data=f"del_plan:{plan_id}"))
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, text, reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "owner_toggle_plan")
+def owner_toggle_plan_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "owner_only"), show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, tr(call.from_user.id, "owner_plans"), reply_markup=plans_keyboard(call.from_user.id, owner=True))
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "owner_edit_plan")
+def owner_edit_plan_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "owner_only"), show_alert=True)
+        return
+    plans = execute("SELECT * FROM subscription_plans ORDER BY id", fetchall=True)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    lang = get_language(call.from_user.id)
+    for plan in plans:
+        name = plan["name_fa"] if lang == "fa" else plan["name_en"]
+        kb.add(types.InlineKeyboardButton(f"✏️ {name} • {plan['days']}d • ⭐{plan['stars']}", callback_data=f"edit_plan:{plan['id']}"))
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, tr(call.from_user.id, "edit_plan"), reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("edit_plan:"))
+def edit_plan_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "owner_only"), show_alert=True)
+        return
+    try:
+        plan_id = int(call.data.split(":", 1)[1])
+    except ValueError:
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "invalid_plan"), show_alert=True)
+        return
+    user_states[call.from_user.id] = {"action": "owner_edit_plan", "plan_id": plan_id}
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, tr(call.from_user.id, "plan_format"))
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_plan:"))
+def toggle_plan_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "owner_only"), show_alert=True)
+        return
+    plan_id = int(call.data.split(":", 1)[1])
+    execute("UPDATE subscription_plans SET active = NOT active WHERE id=?", (plan_id,), commit=True)
+    bot.answer_callback_query(call.id, tr(call.from_user.id, "plan_toggled"))
+    bot.send_message(call.message.chat.id, tr(call.from_user.id, "owner_plans"), reply_markup=plans_keyboard(call.from_user.id, owner=True))
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "owner_add_plan")
 def owner_add_plan_callback(call):
@@ -1199,11 +1305,11 @@ def text_handler(message):
         show_admin_files(message)
         return
 
-    if text in ("📊 آمار من", "📊 My stats"):
+    if text in ("📊 آمار من", "📊 My statistics", "📊 My stats"):
         show_admin_stats(message)
         return
 
-    if text in ("📢 مدیریت کانال‌ها", "📢 Manage channels"):
+    if text in ("📢 مدیریت کانال‌ها", "📢 کانال‌های اجباری", "📢 Manage channels", "📢 Mandatory channels"):
         channel_management(message)
         return
 
@@ -1246,7 +1352,7 @@ def text_handler(message):
             )
         return
 
-    if text in ("📊 آمار کل", "📊 Global stats"):
+    if text in ("📊 آمار کل", "📊 Global statistics", "📊 Global stats"):
         if is_owner(user_id):
             show_global_stats(message)
         return
@@ -1256,18 +1362,18 @@ def text_handler(message):
             show_all_files(message)
         return
 
-    if text in ("💎 تمدید / خرید اشتراک", "💎 Buy / Renew subscription"):
+    if text in ("💎 تمدید / خرید", "💎 تمدید / خرید اشتراک", "💎 Buy / Renew"):
         send_subscription_plans(message.chat.id, user_id)
         return
 
-    if text in ("🌐 زبان / Language", "🌐 Language"):
+    if text in ("🌐 زبان", "🌐 زبان / Language", "🌐 Language"):
         bot.send_message(message.chat.id, tr(user_id, "choose_language"), reply_markup=language_keyboard())
         return
 
     if text in ("💎 مدیریت اشتراک‌ها", "💎 Subscription plans"):
         if is_owner(user_id):
             ensure_default_plan()
-            bot.send_message(message.chat.id, tr(user_id, "owner_plans"), reply_markup=plans_keyboard(user_id, owner=True))
+            bot.send_message(message.chat.id, tr(user_id, "owner_plans"), reply_markup=subscription_management_keyboard(user_id))
         return
 
     if text in ("📢 همه کانال‌ها", "📢 All channels"):
@@ -1391,10 +1497,19 @@ def show_subscription(message):
         bot.send_message(message.chat.id, "⛔ ادمین نیستید.")
         return
 
+    lang = get_language(message.from_user.id)
+    try:
+        expire = datetime.strptime(admin["expire_at"], "%Y-%m-%d %H:%M:%S")
+        remaining = max(0, (expire - datetime.now()).days)
+    except Exception:
+        remaining = 0
+    status_key = "active" if str(admin["status"]).lower() == "active" else "inactive"
     bot.send_message(
         message.chat.id,
-        f"💳 وضعیت اشتراک: {admin['status']}\n"
-        f"📅 تاریخ پایان: {admin['expire_at']}"
+        f"{tr(message.from_user.id, 'subscription_status')}\n\n"
+        f"📌 {tr(message.from_user.id, status_key)}\n"
+        f"📅 {tr(message.from_user.id, 'expires')}: {admin['expire_at']}\n"
+        f"⏳ {tr(message.from_user.id, 'days_left')}: {remaining}"
     )
 
 
@@ -1863,6 +1978,31 @@ def process_state(message, state):
             "✅ کپشن فایل ویرایش شد.",
             reply_markup=owner_keyboard(user_id) if is_owner(user_id) else admin_keyboard(user_id)
         )
+        return
+
+    if action == "owner_edit_plan":
+        if not is_owner(user_id):
+            clear_state(user_id)
+            return
+        parts = [part.strip() for part in text.split("|")]
+        if len(parts) < 5:
+            bot.send_message(message.chat.id, tr(user_id, "invalid_plan"))
+            return
+        try:
+            name_fa, name_en = parts[0], parts[1]
+            days, stars = int(parts[2]), int(parts[3])
+            recurring = parts[4].lower() in ("yes", "true", "1", "بله")
+            if not name_fa or not name_en or days < 1 or stars < 1 or stars > 10000 or (recurring and days != 30):
+                raise ValueError
+            execute("""
+                UPDATE subscription_plans
+                SET name_fa=?, name_en=?, days=?, stars=?, recurring=?
+                WHERE id=?
+            """, (name_fa[:64], name_en[:64], days, stars, recurring, state["plan_id"]), commit=True)
+            clear_state(user_id)
+            bot.send_message(message.chat.id, tr(user_id, "plan_updated"), reply_markup=owner_keyboard(user_id))
+        except Exception:
+            bot.send_message(message.chat.id, tr(user_id, "invalid_plan"))
         return
 
     if action == "owner_add_plan":
