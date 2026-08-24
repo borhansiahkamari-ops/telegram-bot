@@ -3,6 +3,7 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import threading
+import copy
 import secrets
 import time
 import os
@@ -128,7 +129,96 @@ DEFAULT_SUB_DAYS = 30
 # راه‌اندازی ربات و دیتابیس
 # =========================
 
+
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+# =========================
+# سیستم زبان سراسری ربات
+# =========================
+# تمام پیام‌های خروجی و متن دکمه‌ها هنگام انتخاب English به انگلیسی
+# تبدیل می‌شوند. زبان در user_preferences ذخیره می‌شود.
+EN_TEXT_MAP = {'📢 کانال\u200cهای اجباری:\n\n': '📢 Mandatory channels:\n\n', '👥 لیست ادمین\u200cها:\n\n': '👥 Admin list:\n\n', '📂 فایل\u200cهای ثبت\u200cشده:\n\n': '📂 Registered files:\n\n', '📤 آپلود فایل': '📤 Upload file', '📂 فایل\u200cهای من': '📂 My files', '📊 آمار من': '📊 My stats', '📢 مدیریت کانال\u200cها': '📢 Manage channels', '💳 وضعیت اشتراک': '💳 Subscription status', '💎 تمدید / خرید اشتراک': '💎 Buy / Renew subscription', '🎁 اشتراک رایگان ۳ روزه': '🎁 3-Day Free Trial', '🌐 زبان / Language': '🌐 Language', '❌ بستن پنل': '❌ Close panel', '👥 مدیریت ادمین\u200cها': '👥 Manage admins', '➕ افزودن ادمین': '➕ Add admin', '➖ حذف ادمین': '➖ Remove admin', '💰 درآمد': '💰 Revenue', '📊 آمار کل': '📊 Global stats', '📂 همه فایل\u200cها': '📂 All files', '💎 مدیریت اشتراک\u200cها': '💎 Subscription plans', '📢 همه کانال\u200cها': '📢 All channels', '⏱ تنظیم حذف خودکار': '⏱ Auto-delete settings', '🌐 زبان انتخاب شد: فارسی': '🌐 Language selected: Persian', '🌐 زبان را انتخاب کنید / Choose your language:': '🌐 Please choose your language:', 'سلام! 👋\nاین ربات برای دریافت فایل استفاده می\u200cشود.': 'Hello! 👋\nThis bot is used to receive files.', '💎 خرید / تمدید اشتراک': '💎 Buy / Renew subscription', '🎁 دوره آزمایشی رایگان ۳ روزه': '🎁 3-Day Free Trial', '🎁 شما می\u200cتوانید ۳ روز اشتراک رایگان دریافت کنید.': '🎁 You are eligible for a 3-day free trial.', '✅ دوره آزمایشی رایگان شما فعال شد.\n⏳ مدت: ۳ روز\n📅 پایان: {expire}': '✅ Your free trial is now active.\n⏳ Duration: 3 days\n📅 Expires: {expire}', '❌ شما قبلاً از دوره آزمایشی رایگان استفاده کرده\u200cاید.': '❌ You have already used your free trial.', 'ℹ️ شما در حال حاضر یک اشتراک فعال دارید. دوره آزمایشی رایگان برای شما فعال نشد.': 'ℹ️ You already have an active subscription. The free trial was not activated.', '❌ فعال\u200cسازی دوره آزمایشی انجام نشد. لطفاً دوباره تلاش کنید.': '❌ The free trial could not be activated. Please try again.', 'فعلاً هیچ پلن فعالی وجود ندارد.': 'There are no active plans at the moment.', '💎 پلن\u200cهای اشتراک:': '💎 Subscription plans:', '🧾 فاکتور پرداخت در تلگرام برای شما ارسال شد.': '🧾 The payment invoice was sent inside Telegram.', '✅ پرداخت با موفقیت انجام شد و اشتراک شما فعال/تمدید شد.': '✅ Payment completed and your subscription was activated/extended.', '❌ پرداخت ثبت نشد یا اطلاعات پرداخت نامعتبر است.': '❌ Payment could not be registered or the payment information is invalid.', '⛔ فقط مالک به این بخش دسترسی دارد.': '⛔ Owner access only.', '⛔ شما دسترسی ادمین ندارید.': '⛔ You do not have admin access.', '💎 مدیریت پلن\u200cهای اشتراک': '💎 Subscription plan management', '➕ افزودن پلن': '➕ Add plan', '🗑 حذف پلن': '🗑 Delete plan', '📢 همه کانال\u200cهای اجباری': '📢 All mandatory channels', '⏱ تنظیم حذف خودکار برای ادمین': '⏱ Set auto-delete for an admin', '🆔 آیدی عددی ادمین را ارسال کنید.': '🆔 Send the admin numeric ID.', '⏱ زمان حذف خودکار را به ثانیه ارسال کنید.': '⏱ Send the auto-delete time in seconds.', 'فرمت: نام فارسی | نام انگلیسی | تعداد روز | تعداد ستاره | recurring\nمثال: 30 روزه | 30 Days | 30 | 250 | yes': 'Format: Persian name | English name | days | stars | recurring\nExample: 30 Days | 30 Days | 30 | 250 | yes', '✅ پلن با موفقیت اضافه شد.': '✅ Plan added successfully.', '✅ پلن حذف شد.': '✅ Plan deleted.', '❌ اطلاعات پلن نامعتبر است.': '❌ Invalid plan information.', '❌ فقط عدد مثبت ارسال کنید.': '❌ Send a positive number only.', '✅ زمان حذف خودکار ادمین تنظیم شد.': '✅ Admin auto-delete time updated.', 'هیچ کانال اجباری ثبت نشده است.': 'No mandatory channels are registered.', '✅ کانال حذف شد.': '✅ Channel removed.', 'فرمت: admin_id | @channel_username | https://t.me/channel_username': 'Format: admin_id | @channel_username | https://t.me/channel_username', '💳 پشتیبانی پرداخت\n\nاگر از حساب شما Stars کسر شده ولی اشتراک فعال نشده است، رسید پرداخت یا شناسه پرداخت Telegram را برای مالک ربات ارسال کنید.\n\nپرداخت\u200cهای Stars مستقیماً داخل تلگرام انجام می\u200cشوند.': '💳 Payment Support\n\nIf you were charged Stars but your subscription was not activated, please send the payment receipt or Telegram payment charge ID to the bot owner.\n\nTelegram Stars payments are processed inside Telegram.', '🛠 پنل مدیریت ادمین:': '🛠 Admin management panel:', '👑 پنل مالک:': '👑 Owner panel:', 'هیچ کانالی ثبت نشده است.': 'No channels are registered.', 'فایل حذف شد.': 'File deleted.', '🗑 فایل حذف شد و لینک آن غیرفعال گردید.': '🗑 File deleted and its link has been disabled.', '✏️ کپشن جدید را ارسال کنید.\nبرای حذف کپشن، عبارت «بدون کپشن» را ارسال کنید.': '✏️ Send the new caption.\nTo remove the caption, send “No caption”.', '📊 آمار فایل:\n\n📄 نام: ': '📊 File statistics:\n\n📄 Name: ', '\n⬇️ تعداد دانلود: ': '\n⬇️ Downloads: ', '\n📅 تاریخ آپلود: ': '\n📅 Upload date: ', '\n\n👥 آخرین دریافت\u200cکنندگان:\n': '\n\n👥 Recent recipients:\n', 'موردی ثبت نشده است.': 'No records found.', '📢 اطلاعات کانال را در یک خط ارسال کنید:\n\nفرمت پیشنهادی:\n@channel_username | https://t.me/channel_username\n\nربات باید در کانال ادمین باشد.': '📢 Send the channel information in one line:\n\nSuggested format:\n@channel_username | https://t.me/channel_username\n\nThe bot must be an admin in the channel.', 'کانال\u200cها حذف شدند.': 'Channels deleted.', '✅ همه کانال\u200cهای اجباری حذف شدند.': '✅ All mandatory channels have been deleted.', '🇮🇷 فارسی': '🇮🇷 Persian', '➕ افزودن کانال': '➕ Add channel', '👑 به پنل مالک خوش آمدید.\nبرای ورود به پنل از /owner استفاده کنید.': '👑 Welcome to the owner panel.\nUse /owner to open the panel.', '❌ لینک فایل نامعتبر یا منقضی شده است.': '❌ The file link is invalid or expired.', '❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است.': '❌ The file owner’s subscription has expired or the file is inactive.', '⚠️ برای دریافت فایل ابتدا عضو کانال شوید.': '⚠️ Please join the required channel(s) before receiving the file.', '🗑 فایل حذف شد': '🗑 File deleted', 'لینک دریافت پیدا نشد.': 'Download link not found.', 'فایل دیگر موجود نیست.': 'The file is no longer available.', '⛔ اشتراک شما فعال نیست.': '⛔ Your subscription is not active.', '❌ نوع فایل پشتیبانی نمی\u200cشود.': '❌ This file type is not supported.', 'پنل بسته شد.': 'Panel closed.', '📤 فایل را ارسال کنید.\nفرمت\u200cهای PDF، ZIP، MP4، MP3، عکس، وویس و سایر فایل\u200cها پشتیبانی می\u200cشوند.': '📤 Send the file.\nPDF, ZIP, MP4, MP3, images, voice messages, and other file types are supported.', '⛔ دسترسی ندارید.': '⛔ Access denied.', '📂 هنوز فایلی آپلود نکرده\u200cاید.': '📂 You have not uploaded any files yet.', '📊 آمار شما:\n\n📂 تعداد فایل\u200cها: ': '📊 Your statistics:\n\n📂 Files: ', '\n⬇️ تعداد دانلودها: ': '\n⬇️ Downloads: ', '⛔ ادمین نیستید.': '⛔ You are not an admin.', '💳 وضعیت اشتراک: ': '💳 Subscription status: ', '\n📅 تاریخ پایان: ': '\n📅 Expiration date: ', '🗑 حذف همه کانال\u200cها': '🗑 Delete all channels', 'هیچ ادمینی ثبت نشده است.': 'No admins are registered.', '\n📅 پایان: ': '\n📅 Expires: ', '\n📂 فایل\u200cها: ': '\n📂 Files: ', '\n⬇️ دانلودها: ': '\n⬇️ Downloads: ', '\n📌 وضعیت: ': '\n📌 Status: ', '📊 آمار کلی ربات:\n\n👥 کاربران دریافت\u200cکننده: ': '📊 Global bot statistics:\n\n👥 Users who received files: ', '\n⬇️ کل دانلودها: ': '\n⬇️ Total downloads: ', '\n📂 فایل\u200cهای فعال: ': '\n📂 Active files: ', '\n🛡 تعداد ادمین\u200cها: ': '\n🛡 Admins: ', 'هیچ فایلی وجود ندارد.': 'No files exist.', '\n👤 ادمین: ': '\n👤 Admin: ', '\n⬇️ دانلود: ': '\n⬇️ Downloads: ', '\n📅 تاریخ: ': '\n📅 Date: ', 'دسترسی ندارید.': 'Access denied.', '✅ کپشن فایل ویرایش شد.': '✅ File caption updated.', '✅ کانال اجباری ثبت شد.': '✅ Mandatory channel registered.', '✅ کانال اجباری با موفقیت ثبت شد.': '✅ Mandatory channel added successfully.', '30 روزه': '30 Days', '🛠 شما ادمین هستید.\nبرای ورود به پنل از /panel استفاده کنید.': '🛠 You are an admin.\nUse /panel to open the admin panel.', '✅ عضو شدم': '✅ I joined', '✅ فایل ارسال شد\n⏱ این فایل تا ': '✅ File sent\n⏱ This file will be deleted in ', ' ثانیه دیگر حذف خواهد شد': ' seconds.', '❌ ارسال فایل با خطا مواجه شد.': '❌ Failed to send the file.', 'آیدی عددی کاربر را ارسال کنید.': 'Send the user numeric ID.', 'آیدی عددی ادمین را ارسال کنید.': 'Send the admin numeric ID.', '💰 درآمد کل:\nبرای ثبت درآمد واقعی، درگاه پرداخت باید به ربات متصل شود.\nدر حال حاضر درآمد ثبت\u200cشده: 0': '💰 Total revenue:\nA payment gateway must be connected to record real revenue.\nCurrently recorded revenue: 0', '🗑 حذف': '🗑 Delete', '✏️ ویرایش کپشن': '✏️ Edit caption', '📊 آمار': '📊 Statistics', '✅ شما به عنوان ادمین ربات فعال شدید.\nبرای ورود از /panel استفاده کنید.': '✅ You have been activated as a bot admin.\nUse /panel to open the panel.', 'بدون کپشن': 'No caption', '❌ فرمت ناقص است.': '❌ Incomplete format.', '❌ این ادمین در ربات ثبت نشده است.': '❌ This admin is not registered in the bot.', '❌ اطلاعات کانال ناقص است.': '❌ Incomplete channel information.', 'هنوز در همه کانال\u200cها عضو نشده\u200cاید.': 'You have not joined all required channels yet.', 'عضویت شما قابل بررسی نیست.': 'Your membership could not be verified.', '✅ مدت حذف خودکار روی ': '✅ Auto-delete time set to ', ' ثانیه تنظیم شد.': ' seconds.', '❌ فقط یک عدد مثبت ارسال کنید.': '❌ Send a positive number only.', '⛔ دسترسی ادمینی شما مسدود شد.': '⛔ Your admin access has been blocked.', '❌ ادمین پیدا نشد.': '❌ Admin not found.', '❌ admin_id باید عددی باشد.': '❌ admin_id must be numeric.', '❌ کانال پیدا نشد یا ربات دسترسی لازم ندارد.': '❌ Channel not found or the bot lacks the required access.', '❌ کانال پیدا نشد یا ربات در کانال دسترسی لازم ندارد.': '❌ Channel not found or the bot does not have the required access in the channel.', '📢 ورود به کانال': '📢 Join channel', '❌ آیدی باید عددی باشد.': '❌ The ID must be numeric.', ' مسدود شد.': ' has been blocked.', 'لطفاً لینک فایل را از فرستنده دریافت کنید.': 'Please obtain the file link from the sender.', 'بدون نام': 'Unnamed', '⚠️ اشتراک شما منقضی شده است.\nآپلود فایل و لینک\u200cهای قبلی غیرفعال شدند.': '⚠️ Your subscription has expired.\nFile uploads and previous links have been disabled.', '📊 آمار دانلود': '📊 Download statistics'}
+
+def localize_text(user_id, text):
+    """Translate bot-generated Persian UI text for an English-speaking user."""
+    if not text or get_language(user_id) != "en":
+        return text
+    result = str(text)
+    # Replace longer phrases first so fragments do not break full messages.
+    for fa, en in sorted(EN_TEXT_MAP.items(), key=lambda item: len(item[0]), reverse=True):
+        if fa in result:
+            result = result.replace(fa, en)
+    return result
+
+def localize_markup(user_id, markup):
+    """Translate visible keyboard labels without changing callback data."""
+    if not markup or get_language(user_id) != "en":
+        return markup
+    try:
+        cloned = copy.deepcopy(markup)
+        keyboard = getattr(cloned, "keyboard", None)
+        if keyboard is None:
+            keyboard = getattr(cloned, "inline_keyboard", None)
+        if keyboard:
+            for row in keyboard:
+                for button in row:
+                    if hasattr(button, "text") and button.text:
+                        button.text = localize_text(user_id, button.text)
+        return cloned
+    except Exception:
+        return markup
+
+# Keep references to the original TeleBot methods and transparently localize
+# every outgoing private-chat message/callback according to the user's choice.
+_original_send_message = bot.send_message
+_original_edit_message_text = bot.edit_message_text
+_original_answer_callback_query = bot.answer_callback_query
+_original_process_new_updates = bot.process_new_updates
+_callback_users = {}
+
+def _localized_send_message(chat_id, text, *args, **kwargs):
+    try:
+        user_id = int(chat_id)
+    except Exception:
+        user_id = None
+    if user_id is not None:
+        text = localize_text(user_id, text)
+        if "reply_markup" in kwargs:
+            kwargs["reply_markup"] = localize_markup(user_id, kwargs["reply_markup"])
+    return _original_send_message(chat_id, text, *args, **kwargs)
+
+def _localized_edit_message_text(text, chat_id, message_id, *args, **kwargs):
+    try:
+        user_id = int(chat_id)
+    except Exception:
+        user_id = None
+    if user_id is not None:
+        text = localize_text(user_id, text)
+        if "reply_markup" in kwargs:
+            kwargs["reply_markup"] = localize_markup(user_id, kwargs["reply_markup"])
+    return _original_edit_message_text(text, chat_id, message_id, *args, **kwargs)
+
+def _localized_answer_callback_query(callback_query_id, text=None, *args, **kwargs):
+    user_id = _callback_users.pop(callback_query_id, None)
+    if user_id is not None and text:
+        text = localize_text(user_id, text)
+    return _original_answer_callback_query(callback_query_id, text, *args, **kwargs)
+
+def _localized_process_new_updates(updates):
+    # Save callback -> user mapping before TeleBot dispatches handlers.
+    for update in updates or []:
+        try:
+            callback = getattr(update, "callback_query", None)
+            if callback:
+                _callback_users[callback.id] = callback.from_user.id
+        except Exception:
+            pass
+    return _original_process_new_updates(updates)
+
+bot.send_message = _localized_send_message
+bot.edit_message_text = _localized_edit_message_text
+bot.answer_callback_query = _localized_answer_callback_query
+bot.process_new_updates = _localized_process_new_updates
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
@@ -138,6 +228,8 @@ db_lock = threading.RLock()
 
 user_states = {}
 pending_downloads = {}
+# First-time /start flow: language must be selected before continuing.
+pending_start_tokens = {}
 
 def now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -468,6 +560,10 @@ LANG = {
     }
 }
 
+def has_language(user_id):
+    row = execute("SELECT language FROM user_preferences WHERE user_id = ?", (user_id,), fetchone=True)
+    return bool(row and row["language"] in LANG)
+
 def get_language(user_id):
     row = execute("SELECT language FROM user_preferences WHERE user_id = ?", (user_id,), fetchone=True)
     return row["language"] if row and row["language"] in LANG else "fa"
@@ -629,9 +725,14 @@ def activate_paid_subscription(user_id, plan, payment):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("lang:"))
 def language_callback(call):
+    user_id = call.from_user.id
     lang = call.data.split(":", 1)[1]
-    set_language(call.from_user.id, lang)
+    if lang not in LANG:
+        return
+
+    set_language(user_id, lang)
     bot.answer_callback_query(call.id, LANG[lang]["language"])
+
     try:
         bot.edit_message_text(
             LANG[lang]["language"],
@@ -640,6 +741,35 @@ def language_callback(call):
         )
     except Exception:
         pass
+
+    # If /start arrived through a file link, continue that exact request
+    # only after the user has selected a language.
+    pending_token = pending_start_tokens.pop(user_id, None)
+    if pending_token:
+        request_file(call.message, pending_token)
+        return
+
+    # Language is now selected; show the normal home flow in that language.
+    if is_owner(user_id):
+        bot.send_message(
+            call.message.chat.id,
+            "👑 به پنل مالک خوش آمدید.\nبرای ورود به پنل از /owner استفاده کنید.",
+            reply_markup=owner_keyboard(user_id)
+        )
+    elif is_admin(user_id):
+        bot.send_message(
+            call.message.chat.id,
+            "🛠 شما ادمین هستید.\nبرای ورود به پنل از /panel استفاده کنید.",
+            reply_markup=admin_keyboard(user_id)
+        )
+    else:
+        bot.send_message(
+            call.message.chat.id,
+            tr(user_id, "welcome") + "\n\n" +
+            ("لطفاً لینک فایل را از فرستنده دریافت کنید." if lang == "fa"
+             else "Please obtain the file link from the sender.")
+        )
+        send_subscription_plans(call.message.chat.id, user_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "free_trial")
 def free_trial_callback(call):
@@ -685,7 +815,7 @@ def buy_plan_callback(call):
         print(f"Invalid Stars price for plan {plan_id}: {plan['stars']}")
         return
     if plan["recurring"] and plan["days"] != 30:
-        bot.answer_callback_query(call.id, "Telegram Stars recurring subscriptions must be 30 days.", show_alert=True)
+        bot.answer_callback_query(call.id, ("پرداخت دوره‌ای Telegram Stars باید ۳۰ روزه باشد." if get_language(user_id) == "fa" else "Telegram Stars recurring subscriptions must be 30 days."), show_alert=True)
         return
     payload = f"sub:{plan['id']}:{user_id}:{secrets.token_urlsafe(8)}"
     try:
@@ -695,7 +825,7 @@ def buy_plan_callback(call):
         bot.send_invoice(
             user_id,
             title=(plan["name_fa"] if get_language(user_id) == "fa" else plan["name_en"])[:32],
-            description=f"Subscription - {plan['days']} days / {plan['stars']} Telegram Stars"[:255],
+            description=(f"اشتراک - {plan['days']} روز / {plan['stars']} Telegram Stars" if get_language(user_id) == "fa" else f"Subscription - {plan['days']} days / {plan['stars']} Telegram Stars")[:255],
             invoice_payload=payload,
             provider_token="",
             currency="XTR",
@@ -717,7 +847,7 @@ def pre_checkout_handler(pre_checkout_query):
         parts = payload.split(":")
         if len(parts) < 3 or parts[0] != "sub":
             bot.answer_pre_checkout_query(
-                pre_checkout_query.id, ok=False, error_message="Invalid subscription payment."
+                pre_checkout_query.id, ok=False, error_message=("پرداخت اشتراک نامعتبر است." if get_language(pre_checkout_query.from_user.id) == "fa" else "Invalid subscription payment.")
             )
             return
 
@@ -730,19 +860,19 @@ def pre_checkout_handler(pre_checkout_query):
 
         if not plan:
             bot.answer_pre_checkout_query(
-                pre_checkout_query.id, ok=False, error_message="Subscription is no longer available."
+                pre_checkout_query.id, ok=False, error_message=("این اشتراک دیگر در دسترس نیست." if get_language(pre_checkout_query.from_user.id) == "fa" else "Subscription is no longer available.")
             )
             return
 
         if user_id != pre_checkout_query.from_user.id:
             bot.answer_pre_checkout_query(
-                pre_checkout_query.id, ok=False, error_message="This invoice belongs to another user."
+                pre_checkout_query.id, ok=False, error_message=("این فاکتور متعلق به کاربر دیگری است." if get_language(pre_checkout_query.from_user.id) == "fa" else "This invoice belongs to another user.")
             )
             return
 
         if pre_checkout_query.currency != "XTR":
             bot.answer_pre_checkout_query(
-                pre_checkout_query.id, ok=False, error_message="Invalid Telegram Stars currency."
+                pre_checkout_query.id, ok=False, error_message=("واحد پرداخت Telegram Stars نامعتبر است." if get_language(pre_checkout_query.from_user.id) == "fa" else "Invalid Telegram Stars currency.")
             )
             return
 
@@ -754,7 +884,7 @@ def pre_checkout_handler(pre_checkout_query):
                 f"user={user_id}"
             )
             bot.answer_pre_checkout_query(
-                pre_checkout_query.id, ok=False, error_message="Price mismatch."
+                pre_checkout_query.id, ok=False, error_message=("مبلغ پرداخت با قیمت پلن مطابقت ندارد." if get_language(pre_checkout_query.from_user.id) == "fa" else "Price mismatch.")
             )
             return
 
@@ -764,7 +894,7 @@ def pre_checkout_handler(pre_checkout_query):
         print("خطای pre_checkout:", error)
         try:
             bot.answer_pre_checkout_query(
-                pre_checkout_query.id, ok=False, error_message="Payment validation failed."
+                pre_checkout_query.id, ok=False, error_message=("اعتبارسنجی پرداخت ناموفق بود." if get_language(pre_checkout_query.from_user.id) == "fa" else "Payment validation failed.")
             )
         except Exception:
             pass
@@ -920,36 +1050,43 @@ def paysupport_handler(message):
 def start_handler(message):
     user_id = message.from_user.id
     args = message.text.split(maxsplit=1)
+    token = args[1][5:] if len(args) > 1 and args[1].startswith("file_") else None
 
-    if len(args) > 1 and args[1].startswith("file_"):
-        token = args[1][5:]
+    # For a new user, language selection is ALWAYS the first step.
+    if not has_language(user_id):
+        if token:
+            pending_start_tokens[user_id] = token
+        bot.send_message(
+            message.chat.id,
+            "🌐 زبان را انتخاب کنید / Please choose your language:",
+            reply_markup=language_keyboard()
+        )
+        return
+
+    if token:
         request_file(message, token)
         return
 
     if is_owner(user_id):
         bot.send_message(
             message.chat.id,
-            "👑 به پنل مالک خوش آمدید.\nبرای ورود به پنل از /owner استفاده کنید."
+            "👑 به پنل مالک خوش آمدید.\nبرای ورود به پنل از /owner استفاده کنید.",
+            reply_markup=owner_keyboard(user_id)
         )
     elif is_admin(user_id):
         bot.send_message(
             message.chat.id,
-            "🛠 شما ادمین هستید.\nبرای ورود به پنل از /panel استفاده کنید."
+            "🛠 شما ادمین هستید.\nبرای ورود به پنل از /panel استفاده کنید.",
+            reply_markup=admin_keyboard(user_id)
         )
     else:
         bot.send_message(
             message.chat.id,
             tr(user_id, "welcome") + "\n\n" +
             ("لطفاً لینک فایل را از فرستنده دریافت کنید." if get_language(user_id) == "fa"
-             else "Please obtain the file link from the sender.") +
-            "\n\n🌐 Language / زبان",
-            reply_markup=types.InlineKeyboardMarkup().add(
-                types.InlineKeyboardButton("🇮🇷 فارسی", callback_data="lang:fa"),
-                types.InlineKeyboardButton("🇬🇧 English", callback_data="lang:en")
-            )
+             else "Please obtain the file link from the sender.")
         )
         send_subscription_plans(message.chat.id, user_id)
-
 
 @bot.message_handler(commands=["panel"])
 def panel_handler(message):
