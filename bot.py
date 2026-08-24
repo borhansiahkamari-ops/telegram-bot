@@ -1,351 +1,16 @@
-import os
+# -*- coding: utf-8 -*-
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import threading
-import time
-import requests
-import telebot
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from telebot import types
-
-TOKEN = "8915241769:AAHdKt2H-zUm8GavaWONoc-FfaTyGV_vhTo"
-bot = telebot.TeleBot(TOKEN)
-
-# زبان انتخابی هر کاربر
-user_languages = {}
-
-
-# ============================================================
-# COMPATIBILITY / RENDER / SUPABASE HELPERS
-# These helpers are added without removing or changing the
-# existing bot handlers and features.
-# ============================================================
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "6914909647"))
-
-
-def supabase_enabled():
-    return bool(SUPABASE_URL and SUPABASE_KEY)
-
-
-def supabase_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-    }
-
-
-def get_language(user_id):
-    return user_languages.get(user_id, "en")
-
-
-def owner_only(user_id):
-    return int(user_id) == OWNER_ID
-
-
-def save_user(user_id, **fields):
-    # Keep the existing subscription feature working when Supabase
-    # is configured, while remaining safe when it is not configured.
-    if not supabase_enabled():
-        return False
-
-    payload = {"user_id": int(user_id), **fields}
-    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/users"
-
-    try:
-        headers = {
-            **supabase_headers(),
-            "Prefer": "resolution=merge-duplicates,return=minimal",
-        }
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        return r.ok
-    except Exception as e:
-        print("save_user error:", e)
-        return False
-
-
-
-def language_keyboard():
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.row(
-        types.InlineKeyboardButton("🇮🇷 فارسی", callback_data="lang_fa"),
-        types.InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")
-    )
-    return keyboard
-
-
-@bot.message_handler(commands=['start'])
-def welcome(m):
-    bot.reply_to(
-        m,
-        "🌐 Please choose your language / لطفاً زبان خود را انتخاب کنید:",
-        reply_markup=language_keyboard()
-    )
-
-
-@bot.callback_query_handler(func=lambda call: call.data in ['lang_fa', 'lang_en'])
-def choose_language(call):
-    if call.data == "lang_fa":
-        user_languages[call.from_user.id] = "fa"
-        text = "سلام! به ربات من خوش آمدید 🎉\nزبان شما روی فارسی تنظیم شد."
-    else:
-        user_languages[call.from_user.id] = "en"
-        text = "Hello! Welcome to my bot 🎉\nYour language has been set to English."
-
-    bot.answer_callback_query(call.id, "Language saved!")
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id
-    )
-
-
-@bot.message_handler(func=lambda m: True)
-def check_id(m):
-    language = user_languages.get(m.from_user.id, "en")
-
-    if m.from_user.id == 6914909647:
-        if language == "fa":
-            bot.reply_to(m, "سلام ادمین 👑")
-        else:
-            bot.reply_to(m, "Hello admin 👑")
-    else:
-        if language == "fa":
-            bot.reply_to(m, f"کد کاربری شما: {m.from_user.id}")
-        else:
-            bot.reply_to(m, f"Your code: {m.from_user.id}")
-
-
-@bot.callback_query_handler(func=lambda c: c.data in ("osub_open","oexp_open"))
-def owner_management_open(call):
-    if not owner_only(call.from_user.id):
-        bot.answer_callback_query(call.id, "Only owner.", show_alert=True); return
-    bot.answer_callback_query(call.id)
-    if call.data == "osub_open":
-        owner_subscription_manager(call.message.chat.id, call.from_user.id)
-    else:
-        owner_expire_manager(call.message.chat.id, call.from_user.id)
-
-@bot.message_handler(commands=["language"])
-def language_command_restored(m):
-    k = types.InlineKeyboardMarkup()
-    k.row(types.InlineKeyboardButton("🇮🇷 فارسی", callback_data="lang_fa"),
-          types.InlineKeyboardButton("🇬🇧 English", callback_data="lang_en"))
-    bot.send_message(m.chat.id, "🌐 زبان ربات را انتخاب کنید / Choose bot language:", reply_markup=k)
-
-
-# ============================================================
-# SINGLE OWNER SUBSCRIPTION + FILE EXPIRATION MANAGEMENT
-# ============================================================
-OWNER_PLAN_CATALOG = {
-    "free_3d": {"days": 3, "title_fa": "رایگان ۳ روزه", "title_en": "Free 3 days"},
-    "stars_30d": {"days": 30, "title_fa": "۳۰ روزه - ۲۵۰ ⭐", "title_en": "30 days - 250 ⭐"},
-    "stars_90d": {"days": 90, "title_fa": "۹۰ روزه - ۶۵۰ ⭐", "title_en": "90 days - 650 ⭐"},
-    "stars_365d": {"days": 365, "title_fa": "۱ ساله - ۲۰۰۰ ⭐", "title_en": "1 year - 2000 ⭐"},
-}
-_OWNER_STATE = {}
-
-def _owner_setting_get(key, default=30):
-    if not supabase_enabled(): return default
-    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/settings"
-    for col in ("key","name","setting"):
-        try:
-            r = requests.get(url, headers=supabase_headers(),
-                             params={"select":"*", col:f"eq.{key}", "limit":"1"}, timeout=10)
-            if r.ok and r.json(): return r.json()[0].get("value", default)
-        except Exception: pass
-    return default
-
-def _owner_setting_set(key, value):
-    if not supabase_enabled(): return False
-    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/settings"
-    headers = {**supabase_headers(), "Prefer":"resolution=merge-duplicates,return=minimal"}
-    for payload in ({"key":key,"value":str(value)}, {"name":key,"value":str(value)}, {"setting":key,"value":str(value)}):
-        try:
-            r = requests.post(url, headers=headers, json=payload, timeout=10)
-            if r.ok: return True
-        except Exception: pass
-    return False
-
-def owner_subscription_manager(chat_id, owner_id):
-    lang = get_language(owner_id)
-    k = types.InlineKeyboardMarkup()
-    plans = [
-        ("🆓 رایگان ۳ روزه" if lang=="fa" else "🆓 Free 3 days", "osub_free_3d"),
-        ("⭐ ۳۰ روزه - ۲۵۰" if lang=="fa" else "⭐ 30 days - 250", "osub_stars_30d"),
-        ("⭐ ۹۰ روزه - ۶۵۰" if lang=="fa" else "⭐ 90 days - 650", "osub_stars_90d"),
-        ("⭐ ۱ ساله - ۲۰۰۰" if lang=="fa" else "⭐ 1 year - 2000", "osub_stars_365d"),
-    ]
-    for label, data in plans: k.add(types.InlineKeyboardButton(label, callback_data=data))
-    bot.send_message(chat_id,
-        "💳 مدیریت اشتراک\nنوع اشتراک را انتخاب کن؛ سپس شناسه کاربر را بفرست."
-        if lang=="fa" else
-        "💳 Subscription management\nChoose a plan, then send the user's Telegram ID.",
-        reply_markup=k)
-
-def owner_expire_manager(chat_id, owner_id):
-    lang = get_language(owner_id)
-    try: current = int(_owner_setting_get("file_expire_days", 30))
-    except Exception: current = 30
-    k = types.InlineKeyboardMarkup()
-    for d in (1,3,7,30):
-        k.add(types.InlineKeyboardButton(f"{d} روز" if lang=="fa" else f"{d} days", callback_data=f"oexp_{d}"))
-    k.add(types.InlineKeyboardButton("⏱ زمان دلخواه" if lang=="fa" else "⏱ Custom time", callback_data="oexp_custom"))
-    bot.send_message(chat_id,
-        f"⏱ زمان فعلی حذف فایل: {current} روز\nمدت جدید را انتخاب کن:"
-        if lang=="fa" else
-        f"⏱ Current file deletion time: {current} days\nChoose the new duration:",
-        reply_markup=k)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("osub_") or c.data.startswith("oexp_"))
-def owner_management_callbacks_final(call):
-    uid = call.from_user.id
-    if not owner_only(uid):
-        bot.answer_callback_query(call.id, "Only owner.", show_alert=True); return
-    lang = get_language(uid); data = call.data; bot.answer_callback_query(call.id)
-    if data.startswith("osub_"):
-        plan = OWNER_PLAN_CATALOG.get(data[5:])
-        if plan:
-            _OWNER_STATE[uid] = data[5:]
-            bot.send_message(call.message.chat.id,
-                "شناسه عددی کاربر را بفرست:" if lang=="fa" else "Send the user's numeric Telegram ID:")
-        return
-    if data.startswith("oexp_"):
-        value = data[5:]
-        if value == "custom":
-            _OWNER_STATE[uid] = "expire_custom"
-            bot.send_message(call.message.chat.id,
-                "تعداد روز را بفرست (مثلاً 14):" if lang=="fa" else "Send days (e.g. 14):")
-            return
-        days = int(value)
-        if _owner_setting_set("file_expire_days", days):
-            bot.send_message(call.message.chat.id,
-                f"✅ زمان حذف فایل‌ها روی {days} روز تنظیم شد."
-                if lang=="fa" else f"✅ File deletion time set to {days} days.")
-        else: bot.send_message(call.message.chat.id, "❌ ذخیره تنظیمات ناموفق بود.")
-
-@bot.message_handler(func=lambda m: m.from_user.id in _OWNER_STATE)
-def owner_management_input_final(m):
-    uid = m.from_user.id
-    if not owner_only(uid):
-        _OWNER_STATE.pop(uid,None); return
-    state = _OWNER_STATE.get(uid); lang = get_language(uid)
-    if state == "expire_custom":
-        try:
-            days = int(m.text.strip())
-            if not (1 <= days <= 3650) or not _owner_setting_set("file_expire_days", days): raise ValueError
-            _OWNER_STATE.pop(uid,None)
-            bot.reply_to(m, f"✅ زمان حذف فایل روی {days} روز تنظیم شد." if lang=="fa" else f"✅ File deletion time set to {days} days.")
-        except Exception: bot.reply_to(m, "❌ عدد نامعتبر است.")
-        return
-    plan = OWNER_PLAN_CATALOG.get(state)
-    if plan:
-        try:
-            target = int(m.text.strip())
-            until = int(time.time()) + plan["days"]*86400
-            save_user(target, subscription_until=until)
-            _OWNER_STATE.pop(uid,None)
-            bot.reply_to(m, f"✅ {plan['title_fa']} برای {target} فعال شد." if lang=="fa" else f"✅ {plan['title_en']} activated for {target}.")
-        except Exception: bot.reply_to(m, "❌ شناسه کاربر نامعتبر است.")
-
-
-
-# ============================================================
-# RENDER WEBHOOK / HEALTH SERVER
-# Keeps the existing bot handlers and adds Telegram webhook support.
-# Set WEBHOOK_URL in Render to the service URL (e.g. https://your-service.onrender.com).
-# If WEBHOOK_URL is absent, the bot safely falls back to polling.
-# ============================================================
-WEBHOOK_URL = (os.getenv("WEBHOOK_URL", "").strip() or os.getenv("RENDER_EXTERNAL_URL", "").strip()).rstrip("/")
-PORT = int(os.getenv("PORT", "10000"))
-
-class _WebhookHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/", "/health", "/healthz"):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(b"OK")
-            return
-        self.send_response(404)
-        self.end_headers()
-
-    def do_POST(self):
-        if self.path.rstrip("/") != "/telegram/webhook":
-            self.send_response(404)
-            self.end_headers()
-            return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length)
-            update = types.Update.de_json(raw.decode("utf-8"))
-            if update:
-                bot.process_new_updates([update])
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        except Exception as e:
-            print("Webhook update error:", e)
-            self.send_response(500)
-            self.end_headers()
-
-def _start_web_server():
-    server = HTTPServer(("0.0.0.0", PORT), _WebhookHandler)
-    print(f"HTTP server listening on {PORT}")
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
-
-def _configure_telegram_webhook():
-    if not WEBHOOK_URL:
-        return False
-    url = WEBHOOK_URL + "/telegram/webhook"
-    try:
-        bot.remove_webhook()
-        time.sleep(1)
-        bot.set_webhook(url=url, drop_pending_updates=False)
-        print("Telegram webhook configured:", url)
-        return True
-    except Exception as e:
-        print("Webhook setup error:", e)
-        return False
-
-
-
-try:
-    bot.set_my_commands([
-        types.BotCommand("start", "شروع / Start"),
-        types.BotCommand("language", "زبان / Language"),
-        types.BotCommand("subscribe", "اشتراک / Subscribe"),
-        types.BotCommand("status", "وضعیت اشتراک / Status"),
-        types.BotCommand("panel", "پنل مدیریت / Admin panel"),
-    ])
-except Exception as e:
-    print("Command menu setup error:", e)
-
-print("bot is on...")
-_start_web_server()
-if _configure_telegram_webhook():
-    # Webhook mode: Telegram pushes updates to Render, so a sleeping instance
-    # can be activated by an incoming HTTP request when the platform wakes it.
-    while True:
-        time.sleep(3600)
-else:
-    # Existing behavior remains available if WEBHOOK_URL is not configured.
-    bot.infinity_polling()
-
-
-# ============================================================
-# ADDITIONS FROM bot_render_webhook(1).py — NOTHING FROM THE ORIGINAL FILE WAS REMOVED
-# ============================================================
-try:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-except ImportError:
-    psycopg2 = None
-    RealDictCursor = None
-from flask import Flask, request
-from datetime import datetime, timedelta
 import secrets
+import time
+import os
+from datetime import datetime, timedelta
+
+import telebot
+from telebot import types
+from flask import Flask, request
 
 # =========================
 # Flask Keep-Alive / Health Server
@@ -370,7 +35,7 @@ def health():
 # already be running. Webhook mode fixes this: Telegram sends the user's
 # update as an HTTP request, which wakes the Render Web Service.
 WEBHOOK_PATH = "/telegram-webhook"
-WEBHOOK_URL = WEBHOOK_URL or os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
 
 
@@ -444,7 +109,11 @@ def run_flask():
 # تنظیمات اصلی
 # =========================
 
-# Existing BOT_TOKEN/OWNER_ID/bot from the original file are preserved and reused.
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is required.")
+
+OWNER_ID = int(os.environ.get("OWNER_ID", "6914909647"))
 
 DEFAULT_DELETE_AFTER = 17
 
@@ -452,8 +121,10 @@ DEFAULT_SUB_DAYS = 30
 
 
 # =========================
-# Database support from the Render version
+# راه‌اندازی ربات و دیتابیس
 # =========================
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
@@ -553,6 +224,47 @@ def init_database():
                     delete_after INTEGER NOT NULL DEFAULT 60
                 )
             """)
+
+            # Added features: bilingual UI, owner-managed subscription plans,
+            # Telegram Stars payments, and payment history.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    user_id BIGINT PRIMARY KEY,
+                    language TEXT NOT NULL DEFAULT 'fa'
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS subscription_plans (
+                    id BIGSERIAL PRIMARY KEY,
+                    name_fa TEXT NOT NULL,
+                    name_en TEXT NOT NULL,
+                    days INTEGER NOT NULL,
+                    stars INTEGER NOT NULL,
+                    recurring BOOLEAN NOT NULL DEFAULT FALSE,
+                    active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS payments (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    plan_id BIGINT,
+                    payload TEXT UNIQUE NOT NULL,
+                    stars INTEGER NOT NULL,
+                    charge_id TEXT,
+                    paid_at TEXT NOT NULL,
+                    expire_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'paid'
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS file_channels (
+                    file_id BIGINT NOT NULL,
+                    channel_id BIGINT NOT NULL,
+                    PRIMARY KEY (file_id, channel_id)
+                )
+            """)
             connection.commit()
         except Exception:
             connection.rollback()
@@ -600,24 +312,44 @@ def get_active_admin(user_id):
     return get_admin(user_id)
 
 
-def admin_keyboard():
+def admin_keyboard(user_id=None):
+    user_id = user_id if user_id is not None else OWNER_ID
+    if get_language(user_id) == "en":
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        keyboard.row("📤 Upload file", "📂 My files")
+        keyboard.row("📊 My stats", "📢 Manage channels")
+        keyboard.row("💳 Subscription status", "💎 Buy / Renew subscription")
+        keyboard.row("🌐 Language")
+        keyboard.row("❌ Close panel")
+        return keyboard
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row("📤 آپلود فایل", "📂 فایل‌های من")
     keyboard.row("📊 آمار من", "📢 مدیریت کانال‌ها")
-    keyboard.row("⏱ تنظیم حذف خودکار", "💳 وضعیت اشتراک")
+    keyboard.row("💳 وضعیت اشتراک", "💎 تمدید / خرید اشتراک")
+    keyboard.row("🌐 زبان / Language")
     keyboard.row("❌ بستن پنل")
     return keyboard
-
-
-def owner_keyboard():
+def owner_keyboard(user_id=None):
+    user_id = user_id if user_id is not None else OWNER_ID
+    if get_language(user_id) == "en":
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        keyboard.row("👥 Manage admins", "➕ Add admin")
+        keyboard.row("➖ Remove admin", "💰 Revenue")
+        keyboard.row("📊 Global stats", "📂 All files")
+        keyboard.row("💎 Subscription plans", "📢 All channels")
+        keyboard.row("⏱ Auto-delete settings")
+        keyboard.row("🌐 Language")
+        keyboard.row("❌ Close panel")
+        return keyboard
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row("👥 مدیریت ادمین‌ها", "➕ افزودن ادمین")
     keyboard.row("➖ حذف ادمین", "💰 درآمد")
     keyboard.row("📊 آمار کل", "📂 همه فایل‌ها")
+    keyboard.row("💎 مدیریت اشتراک‌ها", "📢 همه کانال‌ها")
+    keyboard.row("⏱ تنظیم حذف خودکار")
+    keyboard.row("🌐 زبان / Language")
     keyboard.row("❌ بستن پنل")
     return keyboard
-
-
 def inline_button(text, callback_data):
     keyboard = types.InlineKeyboardMarkup()
     keyboard.add(types.InlineKeyboardButton(text, callback_data=callback_data))
@@ -634,6 +366,346 @@ def safe_send(chat_id, text, **kwargs):
     except Exception:
         return None
 
+
+
+# =========================
+# قابلیت‌های افزوده: زبان، اشتراک، پرداخت Telegram Stars
+# =========================
+
+LANG = {
+    "fa": {
+        "language": "🌐 زبان انتخاب شد: فارسی",
+        "choose_language": "🌐 زبان را انتخاب کنید / Choose your language:",
+        "welcome": "سلام! 👋\nاین ربات برای دریافت فایل استفاده می‌شود.",
+        "buy": "💎 خرید / تمدید اشتراک",
+        "no_plans": "فعلاً هیچ پلن فعالی وجود ندارد.",
+        "plans": "💎 پلن‌های اشتراک:",
+        "payment_sent": "🧾 فاکتور پرداخت در تلگرام برای شما ارسال شد.",
+        "payment_ok": "✅ پرداخت با موفقیت انجام شد و اشتراک شما فعال/تمدید شد.",
+        "payment_error": "❌ پرداخت ثبت نشد یا اطلاعات پرداخت نامعتبر است.",
+        "owner_only": "⛔ فقط مالک به این بخش دسترسی دارد.",
+        "admin_only": "⛔ شما دسترسی ادمین ندارید.",
+        "owner_plans": "💎 مدیریت پلن‌های اشتراک",
+        "add_plan": "➕ افزودن پلن",
+        "remove_plan": "🗑 حذف پلن",
+        "owner_channels": "📢 همه کانال‌های اجباری",
+        "owner_delete": "⏱ تنظیم حذف خودکار برای ادمین",
+        "send_admin_id": "🆔 آیدی عددی ادمین را ارسال کنید.",
+        "send_seconds": "⏱ زمان حذف خودکار را به ثانیه ارسال کنید.",
+        "plan_format": "فرمت: نام فارسی | نام انگلیسی | تعداد روز | تعداد ستاره | recurring\nمثال: 30 روزه | 30 Days | 30 | 250 | yes",
+        "plan_added": "✅ پلن با موفقیت اضافه شد.",
+        "plan_deleted": "✅ پلن حذف شد.",
+        "invalid_plan": "❌ اطلاعات پلن نامعتبر است.",
+        "invalid_seconds": "❌ فقط عدد مثبت ارسال کنید.",
+        "delete_set": "✅ زمان حذف خودکار ادمین تنظیم شد.",
+        "no_channels": "هیچ کانال اجباری ثبت نشده است.",
+        "channel_removed": "✅ کانال حذف شد.",
+    },
+    "en": {
+        "language": "🌐 Language selected: English",
+        "choose_language": "🌐 زبان را انتخاب کنید / Choose your language:",
+        "welcome": "Hello! 👋\nThis bot is used to receive files.",
+        "buy": "💎 Buy / Renew subscription",
+        "no_plans": "There are no active plans at the moment.",
+        "plans": "💎 Subscription plans:",
+        "payment_sent": "🧾 The payment invoice was sent inside Telegram.",
+        "payment_ok": "✅ Payment completed and your subscription was activated/extended.",
+        "payment_error": "❌ Payment could not be registered.",
+        "owner_only": "⛔ Owner access only.",
+        "admin_only": "⛔ You do not have admin access.",
+        "owner_plans": "💎 Subscription plan management",
+        "add_plan": "➕ Add plan",
+        "remove_plan": "🗑 Delete plan",
+        "owner_channels": "📢 All mandatory channels",
+        "owner_delete": "⏱ Set auto-delete for an admin",
+        "send_admin_id": "🆔 Send the admin's numeric ID.",
+        "send_seconds": "⏱ Send auto-delete time in seconds.",
+        "plan_format": "Format: Persian name | English name | days | stars | recurring\nExample: 30 روزه | 30 Days | 30 | 250 | yes",
+        "plan_added": "✅ Plan added successfully.",
+        "plan_deleted": "✅ Plan deleted.",
+        "invalid_plan": "❌ Invalid plan information.",
+        "invalid_seconds": "❌ Send a positive number only.",
+        "delete_set": "✅ Admin auto-delete time updated.",
+        "no_channels": "No mandatory channels are registered.",
+        "channel_removed": "✅ Channel removed.",
+    }
+}
+
+def get_language(user_id):
+    row = execute("SELECT language FROM user_preferences WHERE user_id = ?", (user_id,), fetchone=True)
+    return row["language"] if row and row["language"] in LANG else "fa"
+
+def set_language(user_id, language):
+    if language not in LANG:
+        return
+    execute("""
+        INSERT INTO user_preferences(user_id, language) VALUES(?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET language=EXCLUDED.language
+    """, (user_id, language), commit=True)
+
+def tr(user_id, key, **kwargs):
+    return LANG[get_language(user_id)].get(key, key).format(**kwargs)
+
+def language_keyboard():
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("🇮🇷 فارسی", callback_data="lang:fa"),
+        types.InlineKeyboardButton("🇬🇧 English", callback_data="lang:en")
+    )
+    return kb
+
+def plans_keyboard(user_id, owner=False):
+    plans = execute(
+        "SELECT * FROM subscription_plans WHERE active = TRUE ORDER BY days, stars",
+        fetchall=True
+    )
+    kb = types.InlineKeyboardMarkup()
+    for plan in plans:
+        name = plan["name_fa"] if get_language(user_id) == "fa" else plan["name_en"]
+        recurring = " 🔄" if plan["recurring"] else ""
+        kb.add(types.InlineKeyboardButton(
+            f"{name} — {plan['days']}d / ⭐{plan['stars']}{recurring}",
+            callback_data=f"buy_plan:{plan['id']}"
+        ))
+    if owner:
+        kb.row(
+            types.InlineKeyboardButton("➕ افزودن پلن", callback_data="owner_add_plan"),
+            types.InlineKeyboardButton("🗑 حذف پلن", callback_data="owner_delete_plan")
+        )
+    return kb
+
+def ensure_default_plan():
+    count = execute("SELECT COUNT(*) AS total FROM subscription_plans", fetchone=True)
+    if not count or count["total"] == 0:
+        execute("""
+            INSERT INTO subscription_plans
+            (name_fa, name_en, days, stars, recurring, active, created_at)
+            VALUES (?, ?, ?, ?, ?, TRUE, ?)
+        """, ("30 روزه", "30 Days", 30, 250, True, now_text()), commit=True)
+
+def send_subscription_plans(chat_id, user_id):
+    ensure_default_plan()
+    plans = execute("SELECT * FROM subscription_plans WHERE active=TRUE ORDER BY days, stars", fetchall=True)
+    if not plans:
+        bot.send_message(chat_id, tr(user_id, "no_plans"))
+        return
+    bot.send_message(chat_id, tr(user_id, "plans"), reply_markup=plans_keyboard(user_id))
+
+def activate_paid_subscription(user_id, plan, payment):
+    current = get_admin(user_id)
+    now = datetime.now()
+    try:
+        current_expire = datetime.strptime(current["expire_at"], "%Y-%m-%d %H:%M:%S") if current else now
+    except Exception:
+        current_expire = now
+    base = current_expire if current and current_expire > now else now
+    # Telegram recurring invoices are always 30 days. One-time plans can use any
+    # positive day count.
+    expire = base + timedelta(days=int(plan["days"]))
+    if current:
+        execute("""
+            UPDATE admins SET status='active', expire_at=? WHERE user_id=?
+        """, (date_text(expire), user_id), commit=True)
+    else:
+        execute("""
+            INSERT INTO admins(user_id,name,created_at,expire_at,status)
+            VALUES(?,?,?,?, 'active')
+        """, (user_id, str(user_id), now_text(), date_text(expire)), commit=True)
+        execute("""
+            INSERT INTO settings(admin_id, delete_after)
+            VALUES(?, ?) ON CONFLICT(admin_id) DO NOTHING
+        """, (user_id, DEFAULT_DELETE_AFTER), commit=True)
+    execute("""
+        INSERT INTO payments(user_id, plan_id, payload, stars, charge_id, paid_at, expire_at)
+        VALUES(?,?,?,?,?,?,?)
+        ON CONFLICT(payload) DO NOTHING
+    """, (
+        user_id, plan["id"], payment.invoice_payload, payment.total_amount,
+        payment.telegram_payment_charge_id, now_text(), date_text(expire)
+    ), commit=True)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("lang:"))
+def language_callback(call):
+    lang = call.data.split(":", 1)[1]
+    set_language(call.from_user.id, lang)
+    bot.answer_callback_query(call.id, LANG[lang]["language"])
+    try:
+        bot.edit_message_text(
+            LANG[lang]["language"],
+            call.message.chat.id,
+            call.message.message_id
+        )
+    except Exception:
+        pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_plan:"))
+def buy_plan_callback(call):
+    user_id = call.from_user.id
+    try:
+        plan_id = int(call.data.split(":", 1)[1])
+    except ValueError:
+        bot.answer_callback_query(call.id, tr(user_id, "invalid_plan"), show_alert=True)
+        return
+    plan = execute(
+        "SELECT * FROM subscription_plans WHERE id=? AND active=TRUE",
+        (plan_id,), fetchone=True
+    )
+    if not plan:
+        bot.answer_callback_query(call.id, tr(user_id, "no_plans"), show_alert=True)
+        return
+    if plan["recurring"] and plan["days"] != 30:
+        bot.answer_callback_query(call.id, "Telegram Stars recurring subscriptions must be 30 days.", show_alert=True)
+        return
+    payload = f"sub:{plan['id']}:{user_id}:{secrets.token_urlsafe(8)}"
+    try:
+        kwargs = {}
+        if plan["recurring"]:
+            kwargs["subscription_period"] = 30 * 24 * 60 * 60
+        bot.send_invoice(
+            user_id,
+            title=(plan["name_fa"] if get_language(user_id) == "fa" else plan["name_en"])[:32],
+            description=f"Subscription - {plan['days']} days / {plan['stars']} Telegram Stars"[:255],
+            invoice_payload=payload,
+            provider_token="",
+            currency="XTR",
+            prices=[types.LabeledPrice(
+                label="Telegram Stars",
+                amount=int(plan["stars"])
+            )],
+            **kwargs
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as error:
+        print("خطای ارسال فاکتور:", error)
+        bot.answer_callback_query(call.id, tr(user_id, "payment_error"), show_alert=True)
+
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def pre_checkout_handler(pre_checkout_query):
+    try:
+        payload = pre_checkout_query.invoice_payload or ""
+        if not payload.startswith("sub:"):
+            bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False, error_message="Invalid payment.")
+            return
+        parts = payload.split(":")
+        plan_id = int(parts[1])
+        user_id = int(parts[2])
+        plan = execute(
+            "SELECT * FROM subscription_plans WHERE id=? AND active=TRUE",
+            (plan_id,), fetchone=True
+        )
+        if not plan or user_id != pre_checkout_query.from_user.id:
+            bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False, error_message="Subscription is unavailable.")
+            return
+        if int(plan["stars"]) != int(pre_checkout_query.total_amount):
+            bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False, error_message="Price mismatch.")
+            return
+        bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+    except Exception as error:
+        print("خطای pre_checkout:", error)
+        try:
+            bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False, error_message="Payment validation failed.")
+        except Exception:
+            pass
+
+@bot.message_handler(content_types=["successful_payment"])
+def successful_payment_handler(message):
+    payment = message.successful_payment
+    user_id = message.from_user.id
+    try:
+        payload = payment.invoice_payload or ""
+        parts = payload.split(":")
+        if len(parts) < 3 or parts[0] != "sub":
+            bot.send_message(user_id, tr(user_id, "payment_error"))
+            return
+        plan = execute(
+            "SELECT * FROM subscription_plans WHERE id=? AND active=TRUE",
+            (int(parts[1]),), fetchone=True
+        )
+        if not plan:
+            bot.send_message(user_id, tr(user_id, "payment_error"))
+            return
+        activate_paid_subscription(user_id, plan, payment)
+        bot.send_message(user_id, tr(user_id, "payment_ok"), reply_markup=admin_keyboard(user_id))
+    except Exception as error:
+        print("خطای ثبت پرداخت:", error)
+        bot.send_message(user_id, tr(user_id, "payment_error"))
+
+@bot.callback_query_handler(func=lambda call: call.data == "owner_add_plan")
+def owner_add_plan_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "owner_only"), show_alert=True)
+        return
+    user_states[call.from_user.id] = {"action": "owner_add_plan"}
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, tr(call.from_user.id, "plan_format"))
+
+@bot.callback_query_handler(func=lambda call: call.data == "owner_delete_plan")
+def owner_delete_plan_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "owner_only"), show_alert=True)
+        return
+    plans = execute("SELECT * FROM subscription_plans WHERE active=TRUE ORDER BY id", fetchall=True)
+    kb = types.InlineKeyboardMarkup()
+    for plan in plans:
+        kb.add(types.InlineKeyboardButton(
+            f"{plan['name_fa']} / {plan['name_en']} — ⭐{plan['stars']}",
+            callback_data=f"del_plan:{plan['id']}"
+        ))
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, tr(call.from_user.id, "owner_plans"), reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("del_plan:"))
+def delete_plan_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "owner_only"), show_alert=True)
+        return
+    plan_id = int(call.data.split(":")[1])
+    execute("UPDATE subscription_plans SET active=FALSE WHERE id=?", (plan_id,), commit=True)
+    bot.answer_callback_query(call.id, tr(call.from_user.id, "plan_deleted"))
+
+@bot.callback_query_handler(func=lambda call: call.data == "owner_channels")
+def owner_channels_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "owner_only"), show_alert=True)
+        return
+    channels = execute("""
+        SELECT c.*, a.name AS admin_name
+        FROM channels c LEFT JOIN admins a ON a.user_id=c.admin_id
+        ORDER BY c.id DESC
+    """, fetchall=True)
+    kb = types.InlineKeyboardMarkup()
+    text = tr(call.from_user.id, "owner_channels") + "\n\n"
+    if not channels:
+        text += tr(call.from_user.id, "no_channels")
+    else:
+        for c in channels:
+            text += f"👤 {c['admin_name'] or c['admin_id']} | {c['channel_username'] or c['channel_id']}\n"
+            kb.add(types.InlineKeyboardButton(
+                f"🗑 {c['channel_username'] or c['channel_id']}",
+                callback_data=f"owner_del_channel:{c['id']}"
+            ))
+    kb.add(types.InlineKeyboardButton("➕ افزودن کانال", callback_data="owner_add_channel"))
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, text, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("owner_del_channel:"))
+def owner_del_channel_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "owner_only"), show_alert=True)
+        return
+    channel_id = int(call.data.split(":")[1])
+    execute("DELETE FROM channels WHERE id=?", (channel_id,), commit=True)
+    bot.answer_callback_query(call.id, tr(call.from_user.id, "channel_removed"))
+    owner_channels_callback(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "owner_add_channel")
+def owner_add_channel_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, tr(call.from_user.id, "owner_only"), show_alert=True)
+        return
+    user_states[call.from_user.id] = {"action": "owner_add_channel"}
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, "فرمت: admin_id | @channel_username | https://t.me/channel_username")
 
 # =========================
 # دستورهای عمومی
@@ -662,9 +734,16 @@ def start_handler(message):
     else:
         bot.send_message(
             message.chat.id,
-            "سلام!\nاین ربات برای دریافت فایل استفاده می‌شود.\n"
-            "لطفاً لینک فایل را از فرستنده دریافت کنید."
+            tr(user_id, "welcome") + "\n\n" +
+            ("لطفاً لینک فایل را از فرستنده دریافت کنید." if get_language(user_id) == "fa"
+             else "Please obtain the file link from the sender.") +
+            "\n\n🌐 Language / زبان",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("🇮🇷 فارسی", callback_data="lang:fa"),
+                types.InlineKeyboardButton("🇬🇧 English", callback_data="lang:en")
+            )
         )
+        send_subscription_plans(message.chat.id, user_id)
 
 
 @bot.message_handler(commands=["panel"])
@@ -682,7 +761,7 @@ def panel_handler(message):
     bot.send_message(
         message.chat.id,
         "🛠 پنل مدیریت ادمین:",
-        reply_markup=admin_keyboard()
+        reply_markup=admin_keyboard(user_id)
     )
 
 
@@ -696,7 +775,7 @@ def owner_handler(message):
     bot.send_message(
         message.chat.id,
         "👑 پنل مالک:",
-        reply_markup=owner_keyboard()
+        reply_markup=owner_keyboard(user_id)
     )
 
 
@@ -1066,7 +1145,7 @@ def upload_handler(message):
         f"📄 نام: <code>{file_name}</code>\n"
         f"🔗 لینک اختصاصی:\n{link}\n\n"
         f"🆔 شناسه فایل: {file_db_id}",
-        reply_markup=admin_keyboard()
+        reply_markup=admin_keyboard(user_id)
     )
 
 
@@ -1079,7 +1158,7 @@ def text_handler(message):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    if text == "❌ بستن پنل":
+    if text in ("❌ بستن پنل", "❌ Close panel"):
         clear_state(user_id)
         bot.send_message(
             message.chat.id,
@@ -1088,7 +1167,7 @@ def text_handler(message):
         )
         return
 
-    if text == "📤 آپلود فایل":
+    if text in ("📤 آپلود فایل", "📤 Upload file"):
         if not is_admin(user_id):
             bot.send_message(message.chat.id, "⛔ اشتراک شما فعال نیست.")
             return
@@ -1101,52 +1180,46 @@ def text_handler(message):
         )
         return
 
-    if text == "📂 فایل‌های من":
+    if text in ("📂 فایل‌های من", "📂 My files"):
         show_admin_files(message)
         return
 
-    if text == "📊 آمار من":
+    if text in ("📊 آمار من", "📊 My stats"):
         show_admin_stats(message)
         return
 
-    if text == "📢 مدیریت کانال‌ها":
+    if text in ("📢 مدیریت کانال‌ها", "📢 Manage channels"):
         channel_management(message)
         return
 
-    if text == "⏱ تنظیم حذف خودکار":
-        if not is_admin(user_id):
-            bot.send_message(message.chat.id, "⛔ دسترسی ندارید.")
-            return
-
-        user_states[user_id] = {"action": "delete_after"}
-        bot.send_message(
-            message.chat.id,
-            f"مدت حذف خودکار را بر حسب ثانیه ارسال کنید.\n"
-            f"مقدار فعلی پیش‌فرض: {DEFAULT_DELETE_AFTER}"
-        )
+    if text in ("⏱ تنظیم حذف خودکار", "⏱ Auto-delete settings"):
+        # Admins no longer have access to auto-delete settings.
+        # Owner handling is performed above.
+        if not is_owner(user_id):
+            bot.send_message(message.chat.id, tr(user_id, "owner_only"))
         return
 
-    if text == "💳 وضعیت اشتراک":
+    if text in ("💳 وضعیت اشتراک", "💳 Subscription status"):
         show_subscription(message)
         return
 
-    if text == "👥 مدیریت ادمین‌ها":
+    if text in ("👥 مدیریت ادمین‌ها", "👥 Manage admins"):
         show_admins(message)
         return
 
-    if text == "➕ افزودن ادمین":
+    if text in ("➕ افزودن ادمین", "➕ Add admin"):
         if is_owner(user_id):
             user_states[user_id] = {"action": "add_admin"}
             bot.send_message(message.chat.id, "آیدی عددی کاربر را ارسال کنید.")
         return
 
-    if text == "➖ حذف ادمین":
+    if text in ("➖ حذف ادمین", "➖ Remove admin"):
         if is_owner(user_id):
             user_states[user_id] = {"action": "remove_admin"}
             bot.send_message(message.chat.id, "آیدی عددی ادمین را ارسال کنید.")
         return
 
-    if text == "💰 درآمد":
+    if text in ("💰 درآمد", "💰 Revenue"):
         if is_owner(user_id):
             bot.send_message(
                 message.chat.id,
@@ -1156,14 +1229,56 @@ def text_handler(message):
             )
         return
 
-    if text == "📊 آمار کل":
+    if text in ("📊 آمار کل", "📊 Global stats"):
         if is_owner(user_id):
             show_global_stats(message)
         return
 
-    if text == "📂 همه فایل‌ها":
+    if text in ("📂 همه فایل‌ها", "📂 All files"):
         if is_owner(user_id):
             show_all_files(message)
+        return
+
+    if text in ("💎 تمدید / خرید اشتراک", "💎 Buy / Renew subscription"):
+        send_subscription_plans(message.chat.id, user_id)
+        return
+
+    if text in ("🌐 زبان / Language", "🌐 Language"):
+        bot.send_message(message.chat.id, tr(user_id, "choose_language"), reply_markup=language_keyboard())
+        return
+
+    if text in ("💎 مدیریت اشتراک‌ها", "💎 Subscription plans"):
+        if is_owner(user_id):
+            ensure_default_plan()
+            bot.send_message(message.chat.id, tr(user_id, "owner_plans"), reply_markup=plans_keyboard(user_id, owner=True))
+        return
+
+    if text in ("📢 همه کانال‌ها", "📢 All channels"):
+        if is_owner(user_id):
+            # Reuse owner callback logic through a small direct rendering.
+            channels = execute("""
+                SELECT c.*, a.name AS admin_name FROM channels c
+                LEFT JOIN admins a ON a.user_id=c.admin_id ORDER BY c.id DESC
+            """, fetchall=True)
+            kb = types.InlineKeyboardMarkup()
+            out = tr(user_id, "owner_channels") + "\n\n"
+            if not channels:
+                out += tr(user_id, "no_channels")
+            else:
+                for c in channels:
+                    out += f"👤 {c['admin_name'] or c['admin_id']} | {c['channel_username'] or c['channel_id']}\n"
+                    kb.add(types.InlineKeyboardButton(
+                        f"🗑 {c['channel_username'] or c['channel_id']}",
+                        callback_data=f"owner_del_channel:{c['id']}"
+                    ))
+            kb.add(types.InlineKeyboardButton("➕ افزودن کانال", callback_data="owner_add_channel"))
+            bot.send_message(message.chat.id, out, reply_markup=kb)
+        return
+
+    if text in ("⏱ تنظیم حذف خودکار", "⏱ Auto-delete settings"):
+        if is_owner(user_id):
+            user_states[user_id] = {"action": "owner_delete_after_admin"}
+            bot.send_message(message.chat.id, tr(user_id, "send_admin_id"))
         return
 
     state = user_states.get(user_id)
@@ -1417,8 +1532,17 @@ def show_all_files(message):
             f"⬇️ دانلود: {item['downloads']}\n"
             f"📅 تاریخ: {item['upload_date']}\n\n"
         )
+        kb = types.InlineKeyboardMarkup()
+        kb.row(
+            types.InlineKeyboardButton("🗑 حذف", callback_data=f"delete_file:{item['id']}"),
+            types.InlineKeyboardButton("✏️ ویرایش کپشن", callback_data=f"edit_caption:{item['id']}"),
+            types.InlineKeyboardButton("📊 آمار", callback_data=f"file_stats:{item['id']}")
+        )
+        bot.send_message(message.chat.id, text, reply_markup=kb)
+        text = ""
 
-    bot.send_message(message.chat.id, text)
+    if text:
+        bot.send_message(message.chat.id, text)
 
 
 # =========================
@@ -1452,7 +1576,7 @@ def process_state(message, state):
             bot.send_message(
                 message.chat.id,
                 f"✅ مدت حذف خودکار روی {seconds} ثانیه تنظیم شد.",
-                reply_markup=admin_keyboard()
+                reply_markup=admin_keyboard(user_id)
             )
 
         except ValueError:
@@ -1512,7 +1636,7 @@ def process_state(message, state):
         bot.send_message(
             message.chat.id,
             f"✅ ادمین {target_id} افزوده یا تمدید شد.",
-            reply_markup=owner_keyboard()
+            reply_markup=owner_keyboard(user_id)
         )
 
         safe_send(
@@ -1542,7 +1666,7 @@ def process_state(message, state):
         bot.send_message(
             message.chat.id,
             f"✅ ادمین {target_id} مسدود شد.",
-            reply_markup=owner_keyboard()
+            reply_markup=owner_keyboard(user_id)
         )
 
         safe_send(target_id, "⛔ دسترسی ادمینی شما مسدود شد.")
@@ -1563,7 +1687,7 @@ def delete_file_callback(call):
         fetchone=True
     )
 
-    if not file_row or file_row["admin_id"] != admin_id:
+    if not file_row or (file_row["admin_id"] != admin_id and not is_owner(admin_id)):
         bot.answer_callback_query(call.id, "دسترسی ندارید.", show_alert=True)
         return
 
@@ -1592,7 +1716,7 @@ def edit_caption_callback(call):
         fetchone=True
     )
 
-    if not file_row or file_row["admin_id"] != admin_id:
+    if not file_row or (file_row["admin_id"] != admin_id and not is_owner(admin_id)):
         bot.answer_callback_query(call.id, "دسترسی ندارید.", show_alert=True)
         return
 
@@ -1620,7 +1744,7 @@ def file_stats_callback(call):
         fetchone=True
     )
 
-    if not file_row or file_row["admin_id"] != admin_id:
+    if not file_row or (file_row["admin_id"] != admin_id and not is_owner(admin_id)):
         bot.answer_callback_query(call.id, "دسترسی ندارید.", show_alert=True)
         return
 
@@ -1718,8 +1842,95 @@ def process_state(message, state):
         bot.send_message(
             message.chat.id,
             "✅ کپشن فایل ویرایش شد.",
-            reply_markup=admin_keyboard()
+            reply_markup=admin_keyboard(user_id)
         )
+        return
+
+    if action == "owner_add_plan":
+        if not is_owner(user_id):
+            clear_state(user_id)
+            return
+        parts = [part.strip() for part in text.split("|")]
+        if len(parts) < 5:
+            bot.send_message(message.chat.id, tr(user_id, "invalid_plan"))
+            return
+        try:
+            name_fa, name_en = parts[0], parts[1]
+            days, stars = int(parts[2]), int(parts[3])
+            recurring = parts[4].lower() in ("yes", "true", "1", "بله")
+            if days < 1 or stars < 1 or stars > 10000 or (recurring and days != 30):
+                raise ValueError
+            execute("""
+                INSERT INTO subscription_plans
+                (name_fa,name_en,days,stars,recurring,active,created_at)
+                VALUES(?,?,?,?,?,TRUE,?)
+            """, (name_fa[:64], name_en[:64], days, stars, recurring, now_text()), commit=True)
+            clear_state(user_id)
+            bot.send_message(message.chat.id, tr(user_id, "plan_added"), reply_markup=owner_keyboard(user_id))
+        except Exception:
+            bot.send_message(message.chat.id, tr(user_id, "invalid_plan"))
+        return
+
+    if action == "owner_delete_after_admin":
+        if not is_owner(user_id):
+            clear_state(user_id)
+            return
+        try:
+            target_id = int(text)
+            if not get_admin(target_id):
+                bot.send_message(message.chat.id, "❌ ادمین پیدا نشد.")
+                return
+            user_states[user_id] = {"action": "owner_delete_after_seconds", "admin_id": target_id}
+            bot.send_message(message.chat.id, tr(user_id, "send_seconds"))
+        except ValueError:
+            bot.send_message(message.chat.id, tr(user_id, "send_admin_id"))
+        return
+
+    if action == "owner_delete_after_seconds":
+        if not is_owner(user_id):
+            clear_state(user_id)
+            return
+        try:
+            seconds = int(text)
+            if seconds < 1:
+                raise ValueError
+            target_id = state["admin_id"]
+            execute("""
+                INSERT INTO settings(admin_id,delete_after) VALUES(?,?)
+                ON CONFLICT(admin_id) DO UPDATE SET delete_after=EXCLUDED.delete_after
+            """, (target_id, seconds), commit=True)
+            clear_state(user_id)
+            bot.send_message(message.chat.id, tr(user_id, "delete_set"), reply_markup=owner_keyboard(user_id))
+        except ValueError:
+            bot.send_message(message.chat.id, tr(user_id, "invalid_seconds"))
+        return
+
+    if action == "owner_add_channel":
+        if not is_owner(user_id):
+            clear_state(user_id)
+            return
+        parts = [part.strip() for part in text.split("|")]
+        if len(parts) < 2:
+            bot.send_message(message.chat.id, "❌ فرمت ناقص است.")
+            return
+        try:
+            target_admin = int(parts[0])
+        except ValueError:
+            bot.send_message(message.chat.id, "❌ admin_id باید عددی باشد.")
+            return
+        channel_username = parts[1]
+        channel_link = parts[2] if len(parts) > 2 else ""
+        try:
+            bot.get_chat(channel_username)
+        except Exception:
+            bot.send_message(message.chat.id, "❌ کانال پیدا نشد یا ربات دسترسی لازم ندارد.")
+            return
+        execute("""
+            INSERT INTO channels(admin_id,channel_id,channel_username,channel_link)
+            VALUES(?,?,?,?)
+        """, (target_admin, channel_username, channel_username, channel_link), commit=True)
+        clear_state(user_id)
+        bot.send_message(message.chat.id, "✅ کانال اجباری ثبت شد.", reply_markup=owner_keyboard(user_id))
         return
 
     if action == "add_channel":
@@ -1762,7 +1973,7 @@ def process_state(message, state):
         bot.send_message(
             message.chat.id,
             "✅ کانال اجباری با موفقیت ثبت شد.",
-            reply_markup=admin_keyboard()
+            reply_markup=admin_keyboard(user_id)
         )
         return
 
@@ -1824,6 +2035,7 @@ def subscription_checker():
 if __name__ == "__main__":
     # ساخت/آماده‌سازی دیتابیس
     init_database()
+    ensure_default_plan()
 
     # اجرای Flask در Thread جداگانه تا با Telegram polling تداخل نداشته باشد
     flask_thread = threading.Thread(
