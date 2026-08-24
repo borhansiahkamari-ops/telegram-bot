@@ -6,6 +6,7 @@ import threading
 import secrets
 import time
 import os
+import html
 from datetime import datetime, timedelta
 
 import telebot
@@ -51,10 +52,13 @@ def telegram_webhook():
             return "Bad Request", 400
 
         update = telebot.types.Update.de_json(request.get_json())
+        if update is None:
+            return "Bad Request", 400
+
         bot.process_new_updates([update])
         return "OK", 200
     except Exception as error:
-        print("خطای webhook:", error)
+        print(f"خطای webhook: {error}")
         return "OK", 200
 
 
@@ -163,6 +167,8 @@ def execute(query, params=(), fetchone=False, fetchall=False, commit=False):
                     result = row["id"] if row and "id" in row else None
             if commit:
                 connection.commit()
+            else:
+                connection.rollback()
             return result
         except Exception:
             connection.rollback()
@@ -265,6 +271,13 @@ def init_database():
                     PRIMARY KEY (file_id, channel_id)
                 )
             """)
+
+            # Performance indexes for the most frequent bot queries.
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_token_active ON files(token, deleted)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_admin_active ON files(admin_id, deleted)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_channels_admin ON channels(admin_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_downloads_file ON downloads(file_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_downloads_user ON downloads(user_id)")
             connection.commit()
         except Exception:
             connection.rollback()
@@ -767,11 +780,13 @@ def panel_handler(message):
 
 @bot.message_handler(commands=["owner"])
 def owner_handler(message):
-    if not is_owner(message.from_user.id):
+    user_id = message.from_user.id
+
+    if not is_owner(user_id):
         bot.send_message(message.chat.id, "⛔ فقط مالک به این بخش دسترسی دارد.")
         return
 
-    clear_state(message.from_user.id)
+    clear_state(user_id)
     bot.send_message(
         message.chat.id,
         "👑 پنل مالک:",
@@ -1142,7 +1157,7 @@ def upload_handler(message):
     bot.send_message(
         message.chat.id,
         f"✅ فایل ذخیره شد.\n\n"
-        f"📄 نام: <code>{file_name}</code>\n"
+        f"📄 نام: <code>{html.escape(file_name)}</code>\n"
         f"🔗 لینک اختصاصی:\n{link}\n\n"
         f"🆔 شناسه فایل: {file_db_id}",
         reply_markup=admin_keyboard(user_id)
@@ -1193,10 +1208,12 @@ def text_handler(message):
         return
 
     if text in ("⏱ تنظیم حذف خودکار", "⏱ Auto-delete settings"):
-        # Admins no longer have access to auto-delete settings.
-        # Owner handling is performed above.
         if not is_owner(user_id):
             bot.send_message(message.chat.id, tr(user_id, "owner_only"))
+            return
+
+        user_states[user_id] = {"action": "owner_delete_after_admin"}
+        bot.send_message(message.chat.id, tr(user_id, "send_admin_id"))
         return
 
     if text in ("💳 وضعیت اشتراک", "💳 Subscription status"):
@@ -1275,12 +1292,6 @@ def text_handler(message):
             bot.send_message(message.chat.id, out, reply_markup=kb)
         return
 
-    if text in ("⏱ تنظیم حذف خودکار", "⏱ Auto-delete settings"):
-        if is_owner(user_id):
-            user_states[user_id] = {"action": "owner_delete_after_admin"}
-            bot.send_message(message.chat.id, tr(user_id, "send_admin_id"))
-        return
-
     state = user_states.get(user_id)
 
     if state:
@@ -1314,7 +1325,7 @@ def show_admin_files(message):
     for item in files:
         bot.send_message(
             message.chat.id,
-            f"📄 <b>{item['file_name']}</b>\n"
+            f"📄 <b>{html.escape(item['file_name'] or 'بدون نام')}</b>\n"
             f"⬇️ دانلود: {item['downloads']}\n"
             f"📅 آپلود: {item['upload_date']}\n"
             f"🔗 توکن: <code>{item['token']}</code>",
@@ -1624,8 +1635,9 @@ def process_state(message, state):
 
         execute(
             """
-            INSERT OR IGNORE INTO settings (admin_id, delete_after)
+            INSERT INTO settings (admin_id, delete_after)
             VALUES (?, ?)
+            ON CONFLICT(admin_id) DO NOTHING
             """,
             (target_id, DEFAULT_DELETE_AFTER),
             commit=True
@@ -1832,17 +1844,24 @@ def process_state(message, state):
     if action == "edit_caption":
         caption = "" if text == "بدون کپشن" else text
 
-        execute(
-            "UPDATE files SET caption = ? WHERE id = ? AND admin_id = ?",
-            (caption, state["file_id"], user_id),
-            commit=True
-        )
+        if is_owner(user_id):
+            execute(
+                "UPDATE files SET caption = ? WHERE id = ?",
+                (caption, state["file_id"]),
+                commit=True
+            )
+        else:
+            execute(
+                "UPDATE files SET caption = ? WHERE id = ? AND admin_id = ?",
+                (caption, state["file_id"], user_id),
+                commit=True
+            )
 
         clear_state(user_id)
         bot.send_message(
             message.chat.id,
             "✅ کپشن فایل ویرایش شد.",
-            reply_markup=admin_keyboard(user_id)
+            reply_markup=owner_keyboard(user_id) if is_owner(user_id) else admin_keyboard(user_id)
         )
         return
 
@@ -1920,6 +1939,11 @@ def process_state(message, state):
             return
         channel_username = parts[1]
         channel_link = parts[2] if len(parts) > 2 else ""
+
+        if not get_admin(target_admin):
+            bot.send_message(message.chat.id, "❌ این ادمین در ربات ثبت نشده است.")
+            return
+
         try:
             bot.get_chat(channel_username)
         except Exception:
@@ -1928,6 +1952,7 @@ def process_state(message, state):
         execute("""
             INSERT INTO channels(admin_id,channel_id,channel_username,channel_link)
             VALUES(?,?,?,?)
+            ON CONFLICT DO NOTHING
         """, (target_admin, channel_username, channel_username, channel_link), commit=True)
         clear_state(user_id)
         bot.send_message(message.chat.id, "✅ کانال اجباری ثبت شد.", reply_markup=owner_keyboard(user_id))
@@ -1959,6 +1984,7 @@ def process_state(message, state):
             INSERT INTO channels
             (admin_id, channel_id, channel_username, channel_link)
             VALUES (?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
             """,
             (
                 user_id,
@@ -2037,7 +2063,7 @@ if __name__ == "__main__":
     init_database()
     ensure_default_plan()
 
-    # اجرای Flask در Thread جداگانه تا با Telegram polling تداخل نداشته باشد
+    # اجرای Flask در Thread جداگانه برای دریافت webhook
     flask_thread = threading.Thread(
         target=run_flask,
         daemon=True,
@@ -2054,6 +2080,8 @@ if __name__ == "__main__":
     checker_thread.start()
 
     print("ربات با موفقیت اجرا شد.")
+    print(f"Webhook path: {WEBHOOK_PATH}")
+    print(f"Webhook base URL configured: {'yes' if WEBHOOK_URL else 'no'}")
     print("Flask health server نیز در پس‌زمینه اجرا شد.")
 
     # Telegram webhook
