@@ -1,1138 +1,1652 @@
-import os
+# -*- coding: utf-8 -*-
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import threading
+import secrets
 import time
-import requests
+import os
+from datetime import datetime, timedelta
+
 import telebot
 from telebot import types
+from flask import Flask
 
 # =========================
-# تنظیمات
+# Flask Keep-Alive / Health Server
 # =========================
 
-# در Render این مقادیر را در Environment Variables قرار بده.
-TOKEN = os.getenv("BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+app = Flask(__name__)
 
-ADMIN_ID = 6914909647
+@app.route("/")
+def home():
+    return "Bot is running!", 200
 
-# قیمت را اینجا تغییر بده.
-# Telegram برای خدمات دیجیتال از Telegram Stars (XTR) استفاده می‌کند.
-# 250 Stars را به‌عنوان قیمت تقریبی پلن 5 دلاری تنظیم کرده‌ایم.
-STAR_PRICE = 250
+@app.route("/health")
+def health():
+    return "OK", 200
 
-# مدت اشتراک: 30 روز
-SUBSCRIPTION_SECONDS = 30 * 24 * 60 * 60
+def run_flask():
+    # Hosting services such as Render/Railway normally provide PORT.
+    # 8000 is used locally if PORT is not defined.
+    try:
+        port = int(os.environ.get("PORT", "8000"))
+    except (TypeError, ValueError):
+        port = 8000
 
-bot = telebot.TeleBot(TOKEN)
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False,
+        threaded=True
+    )
 
-# فقط به‌عنوان fallback موقت؛ روی Render بعد از restart پاک می‌شود.
-user_languages = {}
-local_users = {}
+
+
 
 # =========================
-# مدیریت مالک و ادمین‌ها
+# تنظیمات اصلی
 # =========================
-# مالک همیشه دسترسی کامل دارد.
-# ادمین‌های دیگر از جدول فعلی admins در Supabase خوانده می‌شوند.
-admin_cache = set()
-admin_cache_time = 0
-ADMIN_CACHE_SECONDS = 60
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is required.")
+
+OWNER_ID = int(os.environ.get("OWNER_ID", "6914909647"))
+
+DEFAULT_DELETE_AFTER = 17
+
+DEFAULT_SUB_DAYS = 30
 
 
-def _extract_admin_id(row):
-    """ID ادمین را از چند نام رایج ستون در جدول admins پیدا می‌کند."""
-    if not isinstance(row, dict):
-        return None
+# =========================
+# راه‌اندازی ربات و دیتابیس
+# =========================
 
-    for key in ("user_id", "telegram_id", "admin_id", "id"):
-        value = row.get(key)
-        if value is not None:
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                pass
-    return None
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL environment variable is required.")
 
-def get_admin_ids(force=False):
-    """ادمین‌ها را از جدول admins می‌خواند؛ در صورت خطا مالک همچنان فعال است."""
-    global admin_cache, admin_cache_time
+db_lock = threading.RLock()
 
-    if not force and time.time() - admin_cache_time < ADMIN_CACHE_SECONDS:
-        return set(admin_cache)
+user_states = {}
+pending_downloads = {}
 
-    ids = {ADMIN_ID}
+def now_text():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    if supabase_enabled():
+def date_text(date_obj):
+    return date_obj.strftime("%Y-%m-%d %H:%M:%S")
+
+def get_db():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+def execute(query, params=(), fetchone=False, fetchall=False, commit=False):
+    # SQLite '?' placeholders are converted to PostgreSQL '%s'.
+    query = query.replace("?", "%s")
+    with db_lock:
+        connection = get_db()
+        cursor = connection.cursor(cursor_factory=RealDictCursor)
         try:
-            url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/admins"
-            response = requests.get(
-                url,
-                headers=supabase_headers(),
-                params={"select": "*"},
-                timeout=10,
-            )
-            if response.ok:
-                for row in response.json() or []:
-                    value = _extract_admin_id(row)
-                    if value is not None:
-                        ids.add(value)
+            cursor.execute(query, params)
+            if fetchone:
+                result = cursor.fetchone()
+            elif fetchall:
+                result = cursor.fetchall()
             else:
-                print("Supabase admins read error:", response.status_code, response.text)
-        except Exception as e:
-            print("Admins read error:", e)
+                result = None
+                if cursor.description:
+                    row = cursor.fetchone()
+                    result = row["id"] if row and "id" in row else None
+            if commit:
+                connection.commit()
+            return result
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
 
-    admin_cache = ids
-    admin_cache_time = time.time()
-    return set(ids)
+def init_database():
+    with db_lock:
+        connection = get_db()
+        cursor = connection.cursor()
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS admins (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT UNIQUE NOT NULL,
+                    name TEXT,
+                    created_at TEXT NOT NULL,
+                    expire_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active'
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS files (
+                    id BIGSERIAL PRIMARY KEY,
+                    admin_id BIGINT NOT NULL,
+                    file_id TEXT NOT NULL,
+                    file_name TEXT,
+                    file_type TEXT NOT NULL,
+                    caption TEXT,
+                    token TEXT UNIQUE NOT NULL,
+                    downloads INTEGER NOT NULL DEFAULT 0,
+                    upload_date TEXT NOT NULL,
+                    deleted INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS channels (
+                    id BIGSERIAL PRIMARY KEY,
+                    admin_id BIGINT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    channel_username TEXT,
+                    channel_link TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS downloads (
+                    id BIGSERIAL PRIMARY KEY,
+                    file_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    timestamp TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    admin_id BIGINT PRIMARY KEY,
+                    delete_after INTEGER NOT NULL DEFAULT 60
+                )
+            """)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+
+
+# =========================
+# توابع دسترسی و منوها
+# =========================
+
+def is_owner(user_id):
+    return user_id == OWNER_ID
+
+
+def get_admin(user_id):
+    return execute(
+        "SELECT * FROM admins WHERE user_id = ?",
+        (user_id,),
+        fetchone=True
+    )
 
 
 def is_admin(user_id):
+    admin = get_admin(user_id)
+
+    if not admin:
+        return False
+
+    if admin["status"] != "active":
+        return False
+
     try:
-        return int(user_id) in get_admin_ids()
-    except (TypeError, ValueError):
+        expire_at = datetime.strptime(admin["expire_at"], "%Y-%m-%d %H:%M:%S")
+        return expire_at > datetime.now()
+    except Exception:
         return False
 
 
-def _admin_insert(user_id):
-    """ادمین را به جدول موجود admins اضافه می‌کند.
-    چون ساختار جدول قبلی را تغییر نمی‌دهیم، چند نام رایج ستون را امتحان می‌کند.
-    """
-    if not supabase_enabled():
-        return False
-
-    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/admins"
-    candidates = [
-        {"user_id": int(user_id)},
-        {"telegram_id": int(user_id)},
-        {"admin_id": int(user_id)},
-    ]
-
-    for data in candidates:
-        try:
-            response = requests.post(
-                url,
-                headers=supabase_headers(),
-                json=data,
-                timeout=10,
-            )
-            if response.ok:
-                get_admin_ids(force=True)
-                return True
-        except Exception as e:
-            print("Admin insert error:", e)
-
-    return False
+def get_active_admin(user_id):
+    if not is_admin(user_id):
+        return None
+    return get_admin(user_id)
 
 
-def _admin_delete(user_id):
-    """ادمین را از جدول admins حذف می‌کند؛ مالک هیچ‌وقت حذف نمی‌شود."""
-    if int(user_id) == ADMIN_ID or not supabase_enabled():
-        return False
-
-    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/admins"
-    for column in ("user_id", "telegram_id", "admin_id", "id"):
-        try:
-            response = requests.delete(
-                url,
-                headers=supabase_headers(),
-                params={column: f"eq.{int(user_id)}"},
-                timeout=10,
-            )
-            if response.ok:
-                get_admin_ids(force=True)
-                return True
-        except Exception as e:
-            print("Admin delete error:", e)
-
-    return False
-
-
-def table_count(table):
-    """تعداد ردیف‌های یک جدول را بدون وابستگی به ستون‌های آن می‌گیرد."""
-    if not supabase_enabled():
-        return 0
-
-    try:
-        url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/{table}"
-        headers = {
-            **supabase_headers(),
-            "Prefer": "count=exact",
-        }
-        response = requests.get(
-            url,
-            headers=headers,
-            params={"select": "*", "limit": "1"},
-            timeout=10,
-        )
-        if not response.ok:
-            return 0
-
-        content_range = response.headers.get("Content-Range", "")
-        if "/" in content_range:
-            total = content_range.split("/")[-1]
-            if total.isdigit():
-                return int(total)
-
-        data = response.json()
-        return len(data) if isinstance(data, list) else 0
-    except Exception as e:
-        print(f"{table} count error:", e)
-        return 0
-
-
-def get_bot_user_ids(limit=5000):
-    if not supabase_enabled():
-        return list(local_users.keys())[:limit]
-
-    try:
-        url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/bot_users"
-        response = requests.get(
-            url,
-            headers=supabase_headers(),
-            params={"select": "user_id", "limit": str(limit)},
-            timeout=10,
-        )
-        if response.ok:
-            result = []
-            for row in response.json() or []:
-                try:
-                    result.append(int(row["user_id"]))
-                except (KeyError, TypeError, ValueError):
-                    pass
-            return result
-    except Exception as e:
-        print("User list error:", e)
-
-    return list(local_users.keys())[:limit]
-
-
-def admin_keyboard(language, owner=False):
-    keyboard = types.InlineKeyboardMarkup()
-    if language == "fa":
-        keyboard.row(
-            types.InlineKeyboardButton("📊 آمار", callback_data="admin_stats"),
-            types.InlineKeyboardButton("👥 کاربران", callback_data="admin_users"),
-        )
-        keyboard.row(
-            types.InlineKeyboardButton("💳 اشتراک‌ها", callback_data="admin_subs"),
-            types.InlineKeyboardButton("📁 فایل‌ها", callback_data="admin_files"),
-        )
-        keyboard.row(
-            types.InlineKeyboardButton("📢 پیام همگانی", callback_data="admin_broadcast"),
-        )
-        if owner:
-            keyboard.row(
-                types.InlineKeyboardButton("👮 مدیریت ادمین‌ها", callback_data="owner_admins"),
-                types.InlineKeyboardButton("⚙️ تنظیمات", callback_data="owner_settings"),
-            )
-    else:
-        keyboard.row(
-            types.InlineKeyboardButton("📊 Statistics", callback_data="admin_stats"),
-            types.InlineKeyboardButton("👥 Users", callback_data="admin_users"),
-        )
-        keyboard.row(
-            types.InlineKeyboardButton("💳 Subscriptions", callback_data="admin_subs"),
-            types.InlineKeyboardButton("📁 Files", callback_data="admin_files"),
-        )
-        keyboard.row(
-            types.InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
-        )
-        if owner:
-            keyboard.row(
-                types.InlineKeyboardButton("👮 Manage admins", callback_data="owner_admins"),
-                types.InlineKeyboardButton("⚙️ Settings", callback_data="owner_settings"),
-            )
-    keyboard.row(
-        types.InlineKeyboardButton(
-            "⬅️ بازگشت" if language == "fa" else "⬅️ Back",
-            callback_data="admin_back"
-        )
-    )
+def admin_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row("📤 آپلود فایل", "📂 فایل‌های من")
+    keyboard.row("📊 آمار من", "📢 مدیریت کانال‌ها")
+    keyboard.row("⏱ تنظیم حذف خودکار", "💳 وضعیت اشتراک")
+    keyboard.row("❌ بستن پنل")
     return keyboard
 
 
-def admin_panel_text(language, owner=False):
-    if language == "fa":
-        return (
-            "👑 پنل مالک" if owner else "🛡 پنل ادمین"
-        ) + "\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید."
-    return (
-        "👑 Owner Panel" if owner else "🛡 Admin Panel"
-    ) + "\n\nChoose an option below."
-
-
-def send_admin_panel(chat_id, user_id):
-    language = get_language(user_id)
-    owner = int(user_id) == ADMIN_ID
-    bot.send_message(
-        chat_id,
-        admin_panel_text(language, owner),
-        reply_markup=admin_keyboard(language, owner),
-    )
-
-
-def send_admin_stats(chat_id, user_id):
-    language = get_language(user_id)
-    users = table_count("bot_users")
-    files = table_count("files")
-    downloads = table_count("downloads")
-    admins = len(get_admin_ids())
-
-    if language == "fa":
-        text = (
-            "📊 آمار ربات\n\n"
-            f"👥 کاربران ثبت‌شده: {users}\n"
-            f"📁 فایل‌ها: {files}\n"
-            f"⬇️ دانلودها: {downloads}\n"
-            f"👮 تعداد ادمین‌ها: {admins}"
-        )
-    else:
-        text = (
-            "📊 Bot Statistics\n\n"
-            f"👥 Registered users: {users}\n"
-            f"📁 Files: {files}\n"
-            f"⬇️ Downloads: {downloads}\n"
-            f"👮 Admins: {admins}"
-        )
-    bot.send_message(chat_id, text, reply_markup=admin_keyboard(language, int(user_id) == ADMIN_ID))
-
-
-def send_admin_users(chat_id, user_id):
-    language = get_language(user_id)
-    ids = get_bot_user_ids(limit=100)
-    preview = ids[:30]
-
-    if language == "fa":
-        text = f"👥 کاربران ثبت‌شده: {len(ids)}\n\n"
-        text += "\n".join(f"• `{x}`" for x in preview) if preview else "هنوز کاربری ثبت نشده است."
-        if len(ids) > 30:
-            text += "\n\n... فقط ۳۰ مورد اول نمایش داده شد."
-    else:
-        text = f"👥 Registered users: {len(ids)}\n\n"
-        text += "\n".join(f"• `{x}`" for x in preview) if preview else "No users registered yet."
-        if len(ids) > 30:
-            text += "\n\n... only the first 30 are shown."
-
-    bot.send_message(
-        chat_id,
-        text,
-        parse_mode="Markdown",
-        reply_markup=admin_keyboard(language, int(user_id) == ADMIN_ID),
-    )
-
-
-def send_admin_subs(chat_id, user_id):
-    language = get_language(user_id)
-    active = 0
-    now = int(time.time())
-
-    if supabase_enabled():
-        try:
-            url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/bot_users"
-            response = requests.get(
-                url,
-                headers=supabase_headers(),
-                params={
-                    "select": "user_id,subscription_until",
-                    "subscription_until": f"gt.{now}",
-                    "limit": "5000",
-                },
-                timeout=10,
-            )
-            if response.ok:
-                active = len(response.json() or [])
-        except Exception as e:
-            print("Subscriptions count error:", e)
-
-    if language == "fa":
-        text = f"💳 اشتراک‌های فعال: {active}"
-    else:
-        text = f"💳 Active subscriptions: {active}"
-
-    bot.send_message(
-        chat_id,
-        text,
-        reply_markup=admin_keyboard(language, int(user_id) == ADMIN_ID),
-    )
-
-
-def send_admin_files(chat_id, user_id):
-    language = get_language(user_id)
-    count = table_count("files")
-    if language == "fa":
-        text = f"📁 تعداد فایل‌های ثبت‌شده: {count}"
-    else:
-        text = f"📁 Stored files: {count}"
-
-    bot.send_message(
-        chat_id,
-        text,
-        reply_markup=admin_keyboard(language, int(user_id) == ADMIN_ID),
-    )
-
-
-def send_owner_admins(chat_id, user_id):
-    language = get_language(user_id)
-    ids = sorted(get_admin_ids())
-    lines = []
-    for admin_id in ids:
-        role = "👑 مالک" if admin_id == ADMIN_ID else "🛡 ادمین"
-        lines.append(f"{role}: `{admin_id}`")
-
-    if language == "fa":
-        text = "👮 مدیریت ادمین‌ها\n\n" + (
-            "\n".join(lines) if lines else "ادمینی ثبت نشده است."
-        ) + "\n\nبرای افزودن: /addadmin USER_ID\nبرای حذف: /deladmin USER_ID"
-    else:
-        text = "👮 Admin Management\n\n" + (
-            "\n".join(lines) if lines else "No admins registered."
-        ) + "\n\nAdd: /addadmin USER_ID\nRemove: /deladmin USER_ID"
-
-    bot.send_message(
-        chat_id,
-        text,
-        parse_mode="Markdown",
-        reply_markup=admin_keyboard(language, True),
-    )
-
-
-def broadcast_message(owner_id, source_message):
-    ids = get_bot_user_ids(limit=5000)
-    sent = 0
-    failed = 0
-
-    for target_id in ids:
-        if target_id == owner_id:
-            continue
-        try:
-            bot.copy_message(
-                target_id,
-                source_message.chat.id,
-                source_message.message_id,
-            )
-            sent += 1
-        except Exception:
-            failed += 1
-
-    return sent, failed
-
-
-
-
-# =========================
-# Supabase
-# =========================
-
-def supabase_enabled():
-    return bool(SUPABASE_URL and SUPABASE_KEY)
-
-
-def supabase_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-
-
-def get_user(user_id):
-    """اطلاعات کاربر را از Supabase می‌خواند."""
-    if not supabase_enabled():
-        return local_users.get(user_id, {})
-
-    try:
-        url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/bot_users"
-        params = {"user_id": f"eq.{user_id}", "limit": "1"}
-        response = requests.get(
-            url,
-            headers=supabase_headers(),
-            params=params,
-            timeout=10
-        )
-
-        if response.ok and response.json():
-            return response.json()[0]
-
-    except Exception as e:
-        print("Supabase get error:", e)
-
-    return local_users.get(user_id, {})
-
-
-def save_user(user_id, language=None, subscription_until=None, charge_id=None):
-    """کاربر را در Supabase ثبت/به‌روزرسانی می‌کند."""
-    old = get_user(user_id)
-
-    data = {
-        "user_id": user_id,
-        "language": language if language else old.get("language", "en"),
-        "subscription_until": (
-            subscription_until
-            if subscription_until is not None
-            else old.get("subscription_until")
-        ),
-        "telegram_payment_charge_id": (
-            charge_id
-            if charge_id is not None
-            else old.get("telegram_payment_charge_id")
-        ),
-        "updated_at": int(time.time())
-    }
-
-    local_users[user_id] = data
-
-    if not supabase_enabled():
-        return True
-
-    try:
-        url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/bot_users"
-        response = requests.post(
-            url,
-            headers={
-                **supabase_headers(),
-                "Prefer": "resolution=merge-duplicates,return=representation"
-            },
-            params={"on_conflict": "user_id"},
-            json=data,
-            timeout=10
-        )
-        return response.ok
-
-    except Exception as e:
-        print("Supabase save error:", e)
-        return False
-
-
-def get_language(user_id):
-    user = get_user(user_id)
-    return user.get("language", "en")
-
-
-def is_subscribed(user_id):
-    if is_admin(user_id):
-        return True
-
-    user = get_user(user_id)
-    until = user.get("subscription_until")
-
-    try:
-        return until is not None and int(until) > int(time.time())
-    except (TypeError, ValueError):
-        return False
-
-
-# =========================
-# متن‌ها
-# =========================
-
-def language_keyboard():
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.row(
-        types.InlineKeyboardButton("🇮🇷 فارسی", callback_data="lang_fa"),
-        types.InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")
-    )
+def owner_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row("👥 مدیریت ادمین‌ها", "➕ افزودن ادمین")
+    keyboard.row("➖ حذف ادمین", "💰 درآمد")
+    keyboard.row("📊 آمار کل", "📂 همه فایل‌ها")
+    keyboard.row("📢 همه کانال‌ها", "💳 مدیریت اشتراک‌ها")
+    keyboard.row("⏱ تنظیم حذف خودکار", "❌ بستن پنل")
     return keyboard
 
 
-def main_keyboard(language):
+def inline_button(text, callback_data):
     keyboard = types.InlineKeyboardMarkup()
-
-    if language == "fa":
-        keyboard.row(
-            types.InlineKeyboardButton("💳 خرید اشتراک", callback_data="subscribe"),
-            types.InlineKeyboardButton("📅 وضعیت اشتراک", callback_data="status")
-        )
-        keyboard.row(
-            types.InlineKeyboardButton("🌐 تغییر زبان", callback_data="change_language")
-        )
-    else:
-        keyboard.row(
-            types.InlineKeyboardButton("💳 Subscribe", callback_data="subscribe"),
-            types.InlineKeyboardButton("📅 Subscription", callback_data="status")
-        )
-        keyboard.row(
-            types.InlineKeyboardButton("🌐 Change language", callback_data="change_language")
-        )
-
+    keyboard.add(types.InlineKeyboardButton(text, callback_data=callback_data))
     return keyboard
 
 
-def welcome_text(language):
-    if language == "fa":
-        return (
-            "سلام! به ربات من خوش آمدید 🎉\n\n"
-            "زبان شما روی فارسی تنظیم شد.\n\n"
-            "برای استفاده از امکانات پولی، اشتراک ۳۰ روزه تهیه کنید."
-        )
-
-    return (
-        "Hello! Welcome to my bot 🎉\n\n"
-        "Your language has been set to English.\n\n"
-        "Subscribe for 30 days to use the paid features."
-    )
+def clear_state(user_id):
+    user_states.pop(user_id, None)
 
 
-def subscription_text(language):
-    if language == "fa":
-        return (
-            "⭐ اشتراک ۳۰ روزه\n\n"
-            "قیمت: 250 Telegram Stars\n"
-            "مدت: 30 روز\n\n"
-            "با پرداخت، اشتراک شما فعال می‌شود."
-        )
-
-    return (
-        "⭐ 30-Day Subscription\n\n"
-        "Price: 250 Telegram Stars\n"
-        "Duration: 30 days\n\n"
-        "Your subscription will be activated after payment."
-    )
-
-
-def expired_text(language):
-    if language == "fa":
-        return (
-            "⛔ اشتراک شما فعال نیست یا منقضی شده است.\n\n"
-            "برای ادامه استفاده، اشتراک ۳۰ روزه تهیه کنید."
-        )
-
-    return (
-        "⛔ Your subscription is inactive or expired.\n\n"
-        "Please subscribe for 30 days to continue."
-    )
-
-
-def status_text(language, until):
-    if until and int(until) > int(time.time()):
-        remaining = int(until) - int(time.time())
-        days = max(1, remaining // 86400)
-
-        if language == "fa":
-            return f"✅ اشتراک شما فعال است.\n\n⏳ حدود {days} روز باقی مانده است."
-
-        return f"✅ Your subscription is active.\n\n⏳ About {days} days remaining."
-
-    if language == "fa":
-        return "❌ اشتراک شما فعال نیست."
-
-    return "❌ Your subscription is not active."
-
-
-# =========================
-# اشتراک
-# =========================
-
-def send_subscription_invoice(chat_id):
-    language = get_language(chat_id)
-
+def safe_send(chat_id, text, **kwargs):
     try:
-        prices = [types.LabeledPrice("30-Day Subscription", STAR_PRICE)]
-
-        # اشتراک خودکار 30 روزه Telegram Stars
-        invoice_link = bot.create_invoice_link(
-            title="30-Day Subscription",
-            description="30 days access to the bot",
-            payload=f"subscription:{chat_id}",
-            provider_token=None,
-            currency="XTR",
-            prices=prices,
-            subscription_period=SUBSCRIPTION_SECONDS
-        )
-
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(
-            types.InlineKeyboardButton(
-                "⭐ پرداخت / Pay",
-                url=invoice_link
-            )
-        )
-
-        if language == "fa":
-            text = subscription_text(language)
-        else:
-            text = subscription_text(language)
-
-        bot.send_message(chat_id, text, reply_markup=keyboard)
-
-    except Exception as e:
-        print("Invoice error:", e)
-
-        if language == "fa":
-            bot.send_message(
-                chat_id,
-                "❌ فعلاً امکان ساخت فاکتور وجود ندارد. "
-                "لطفاً بعداً دوباره امتحان کنید."
-            )
-        else:
-            bot.send_message(
-                chat_id,
-                "❌ I couldn't create the payment invoice right now. "
-                "Please try again later."
-            )
-
-
-@bot.pre_checkout_query_handler(func=lambda query: True)
-def process_pre_checkout(query):
-    # پرداخت دیجیتال Telegram Stars
-    try:
-        bot.answer_pre_checkout_query(query.id, ok=True)
-    except Exception as e:
-        print("Pre-checkout error:", e)
-
-
-@bot.message_handler(content_types=["successful_payment"])
-def successful_payment(message):
-    payment = message.successful_payment
-    user_id = message.from_user.id
-
-    # Telegram برای اشتراک Stars تاریخ انقضا را می‌تواند برگرداند.
-    expiration = getattr(payment, "subscription_expiration_date", None)
-
-    if not expiration:
-        expiration = int(time.time()) + SUBSCRIPTION_SECONDS
-
-    charge_id = getattr(payment, "telegram_payment_charge_id", None)
-
-    save_user(
-        user_id=user_id,
-        subscription_until=int(expiration),
-        charge_id=charge_id
-    )
-
-    language = get_language(user_id)
-
-    if language == "fa":
-        bot.send_message(
-            message.chat.id,
-            "✅ پرداخت با موفقیت انجام شد!\n\n"
-            "🎉 اشتراک ۳۰ روزه شما فعال شد."
-        )
-    else:
-        bot.send_message(
-            message.chat.id,
-            "✅ Payment successful!\n\n"
-            "🎉 Your 30-day subscription is now active."
-        )
+        return bot.send_message(chat_id, text, **kwargs)
+    except Exception:
+        return None
 
 
 # =========================
-# دستورات
+# دستورهای عمومی
 # =========================
 
 @bot.message_handler(commands=["start"])
-def welcome(m):
-    user_id = m.from_user.id
-    user = get_user(user_id)
+def start_handler(message):
+    user_id = message.from_user.id
+    args = message.text.split(maxsplit=1)
 
-    if not user.get("language"):
-        bot.reply_to(
-            m,
-            "🌐 Please choose your language / لطفاً زبان خود را انتخاب کنید:",
-            reply_markup=language_keyboard()
+    if len(args) > 1 and args[1].startswith("file_"):
+        token = args[1][5:]
+        request_file(message, token)
+        return
+
+    if is_owner(user_id):
+        bot.send_message(
+            message.chat.id,
+            "👑 به پنل مالک خوش آمدید.\nبرای ورود به پنل از /owner استفاده کنید."
         )
-        return
-
-    language = user.get("language", "en")
-
-    bot.reply_to(
-        m,
-        welcome_text(language),
-        reply_markup=main_keyboard(language)
-    )
-
-
-@bot.message_handler(commands=["admin", "panel"])
-def admin_command(m):
-    if not is_admin(m.from_user.id):
-        language = get_language(m.from_user.id)
-        bot.reply_to(
-            m,
-            "⛔ دسترسی ندارید." if language == "fa" else "⛔ Access denied."
-        )
-        return
-    send_admin_panel(m.chat.id, m.from_user.id)
-
-
-@bot.message_handler(commands=["addadmin"])
-def add_admin_command(m):
-    if m.from_user.id != ADMIN_ID:
-        return
-
-    parts = m.text.split(maxsplit=1)
-    language = get_language(m.from_user.id)
-
-    if len(parts) != 2 or not parts[1].strip().isdigit():
-        bot.reply_to(
-            m,
-            "فرمت: /addadmin USER_ID" if language == "fa"
-            else "Format: /addadmin USER_ID"
-        )
-        return
-
-    target_id = int(parts[1].strip())
-    if target_id == ADMIN_ID:
-        bot.reply_to(m, "این کاربر خود مالک است." if language == "fa" else "This user is already the owner.")
-        return
-
-    if _admin_insert(target_id):
-        bot.reply_to(
-            m,
-            f"✅ ادمین {target_id} اضافه شد." if language == "fa"
-            else f"✅ Admin {target_id} added."
+    elif is_admin(user_id):
+        bot.send_message(
+            message.chat.id,
+            "🛠 شما ادمین هستید.\nبرای ورود به پنل از /panel استفاده کنید."
         )
     else:
-        bot.reply_to(
-            m,
-            "❌ افزودن ادمین انجام نشد. ساختار جدول admins را بررسی کن."
-            if language == "fa"
-            else "❌ Could not add the admin. Please check the admins table schema."
-        )
-
-
-@bot.message_handler(commands=["deladmin"])
-def del_admin_command(m):
-    if m.from_user.id != ADMIN_ID:
-        return
-
-    parts = m.text.split(maxsplit=1)
-    language = get_language(m.from_user.id)
-
-    if len(parts) != 2 or not parts[1].strip().isdigit():
-        bot.reply_to(
-            m,
-            "فرمت: /deladmin USER_ID" if language == "fa"
-            else "Format: /deladmin USER_ID"
-        )
-        return
-
-    target_id = int(parts[1].strip())
-    if target_id == ADMIN_ID:
-        bot.reply_to(
-            m,
-            "❌ مالک قابل حذف نیست." if language == "fa"
-            else "❌ The owner cannot be removed."
-        )
-        return
-
-    if _admin_delete(target_id):
-        bot.reply_to(
-            m,
-            f"✅ ادمین {target_id} حذف شد." if language == "fa"
-            else f"✅ Admin {target_id} removed."
-        )
-    else:
-        bot.reply_to(
-            m,
-            "❌ حذف ادمین انجام نشد." if language == "fa"
-            else "❌ Could not remove the admin."
-        )
-
-
-@bot.message_handler(commands=["broadcast"])
-def broadcast_command(m):
-    if not is_admin(m.from_user.id):
-        return
-
-    language = get_language(m.from_user.id)
-    if not m.reply_to_message:
-        bot.reply_to(
-            m,
-            "روی پیام موردنظر Reply بزن و /broadcast را ارسال کن."
-            if language == "fa"
-            else "Reply to the message you want to broadcast, then send /broadcast."
-        )
-        return
-
-    sent, failed = broadcast_message(m.from_user.id, m.reply_to_message)
-    bot.reply_to(
-        m,
-        f"📢 ارسال شد: {sent}\\n❌ ناموفق: {failed}"
-        if language == "fa"
-        else f"📢 Sent: {sent}\\n❌ Failed: {failed}"
-    )
-
-
-@bot.message_handler(commands=["language"])
-def change_language_command(m):
-    bot.send_message(
-        m.chat.id,
-        "🌐 Please choose your language / لطفاً زبان خود را انتخاب کنید:",
-        reply_markup=language_keyboard()
-    )
-
-
-@bot.message_handler(commands=["subscribe"])
-def subscribe_command(m):
-    if is_admin(m.from_user.id):
-        language = get_language(m.from_user.id)
         bot.send_message(
-            m.chat.id,
-            "👑 Admin access is always active." if language == "en"
-            else "👑 دسترسی ادمین همیشه فعال است."
+            message.chat.id,
+            "سلام!\nاین ربات برای دریافت فایل استفاده می‌شود.\n"
+            "لطفاً لینک فایل را از فرستنده دریافت کنید."
         )
-        return
-
-    if is_subscribed(m.from_user.id):
-        language = get_language(m.from_user.id)
-        user = get_user(m.from_user.id)
-        bot.send_message(
-            m.chat.id,
-            status_text(language, user.get("subscription_until"))
-        )
-        return
-
-    send_subscription_invoice(m.chat.id)
 
 
-@bot.message_handler(commands=["status"])
-def status_command(m):
-    language = get_language(m.from_user.id)
-    user = get_user(m.from_user.id)
-
-    bot.send_message(
-        m.chat.id,
-        status_text(language, user.get("subscription_until")),
-        reply_markup=main_keyboard(language)
-    )
-
-
-# =========================
-# دکمه‌های زبان و منو
-# =========================
-
-@bot.callback_query_handler(
-    func=lambda call: call.data.startswith("admin_")
-    or call.data.startswith("owner_")
-)
-def admin_button_handler(call):
-    user_id = call.from_user.id
+@bot.message_handler(commands=["panel"])
+def panel_handler(message):
+    user_id = message.from_user.id
 
     if not is_admin(user_id):
-        bot.answer_callback_query(call.id, "Access denied.", show_alert=True)
-        return
-
-    language = get_language(user_id)
-    owner = user_id == ADMIN_ID
-    data = call.data
-
-    if data == "admin_back":
-        bot.answer_callback_query(call.id)
-        bot.edit_message_text(
-            welcome_text(language),
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=main_keyboard(language),
-        )
-        return
-
-    if data == "admin_stats":
-        bot.answer_callback_query(call.id)
-        send_admin_stats(call.message.chat.id, user_id)
-        return
-
-    if data == "admin_users":
-        bot.answer_callback_query(call.id)
-        send_admin_users(call.message.chat.id, user_id)
-        return
-
-    if data == "admin_subs":
-        bot.answer_callback_query(call.id)
-        send_admin_subs(call.message.chat.id, user_id)
-        return
-
-    if data == "admin_files":
-        bot.answer_callback_query(call.id)
-        send_admin_files(call.message.chat.id, user_id)
-        return
-
-    if data == "admin_broadcast":
-        bot.answer_callback_query(call.id)
         bot.send_message(
-            call.message.chat.id,
-            "📢 برای ارسال همگانی، روی پیام موردنظر Reply کن و /broadcast را بفرست."
-            if language == "fa"
-            else "📢 Reply to the message you want to broadcast and send /broadcast.",
+            message.chat.id,
+            "⛔ شما دسترسی ادمین ندارید."
         )
         return
 
-    if data == "owner_admins":
-        if not owner:
-            bot.answer_callback_query(call.id, "Owner only.", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        send_owner_admins(call.message.chat.id, user_id)
+    clear_state(user_id)
+    bot.send_message(
+        message.chat.id,
+        "🛠 پنل مدیریت ادمین:",
+        reply_markup=admin_keyboard()
+    )
+
+
+@bot.message_handler(commands=["owner"])
+def owner_handler(message):
+    if not is_owner(message.from_user.id):
+        bot.send_message(message.chat.id, "⛔ فقط مالک به این بخش دسترسی دارد.")
         return
 
-    if data == "owner_settings":
-        if not owner:
-            bot.answer_callback_query(call.id, "Owner only.", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
+    clear_state(message.from_user.id)
+    bot.send_message(
+        message.chat.id,
+        "👑 پنل مالک:",
+        reply_markup=owner_keyboard()
+    )
+
+
+# =========================
+# دریافت فایل از لینک
+# =========================
+
+def request_file(message, token):
+    user_id = message.from_user.id
+
+    file_row = execute(
+        "SELECT * FROM files WHERE token = ? AND deleted = 0",
+        (token,),
+        fetchone=True
+    )
+
+    if not file_row:
+        bot.send_message(message.chat.id, "❌ لینک فایل نامعتبر یا منقضی شده است.")
+        return
+
+    admin = execute(
+        "SELECT * FROM admins WHERE user_id = ?",
+        (file_row["admin_id"],),
+        fetchone=True
+    )
+
+    if not admin or not is_admin(admin["user_id"]):
         bot.send_message(
-            call.message.chat.id,
-            "⚙️ تنظیمات فعلاً شامل قیمت اشتراک و مدت اشتراک است.\n"
-            f"⭐ قیمت: {STAR_PRICE} Stars\n"
-            "📅 مدت: 30 روز\n\n"
-            "برای تغییر قیمت متغیر STAR_PRICE را تغییر بده."
-            if language == "fa"
-            else
-            "⚙️ Current settings:\n"
-            f"⭐ Price: {STAR_PRICE} Stars\n"
-            "📅 Duration: 30 days\n\n"
-            "Change STAR_PRICE in the code to change the price.",
-            reply_markup=admin_keyboard(language, True),
+            message.chat.id,
+            "❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است."
         )
         return
 
-@bot.callback_query_handler(
-    func=lambda call: call.data in [
-        "lang_fa",
-        "lang_en",
-        "subscribe",
-        "status",
-        "change_language"
-    ]
-)
-def button_handler(call):
-    user_id = call.from_user.id
+    channels = execute(
+        "SELECT * FROM channels WHERE admin_id = ?",
+        (admin["user_id"],),
+        fetchall=True
+    )
 
-    if call.data == "lang_fa":
-        save_user(user_id, language="fa")
-        language = "fa"
+    not_joined = []
 
-        bot.answer_callback_query(call.id, "زبان فارسی ذخیره شد.")
-        bot.edit_message_text(
-            welcome_text(language),
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=main_keyboard(language)
-        )
-        return
+    for channel in channels:
+        try:
+            member = bot.get_chat_member(channel["channel_id"], user_id)
 
-    if call.data == "lang_en":
-        save_user(user_id, language="en")
-        language = "en"
+            if member.status in ("left", "kicked"):
+                not_joined.append(channel)
 
-        bot.answer_callback_query(call.id, "English saved.")
-        bot.edit_message_text(
-            welcome_text(language),
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=main_keyboard(language)
-        )
-        return
+        except Exception:
+            not_joined.append(channel)
 
-    language = get_language(user_id)
+    if not_joined:
+        pending_downloads[user_id] = token
 
-    if call.data == "change_language":
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            "🌐 Please choose your language / لطفاً زبان خود را انتخاب کنید:",
-            reply_markup=language_keyboard()
-        )
-        return
+        keyboard = types.InlineKeyboardMarkup()
 
-    if call.data == "status":
-        user = get_user(user_id)
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            status_text(language, user.get("subscription_until")),
-            reply_markup=main_keyboard(language)
-        )
-        return
+        for channel in not_joined:
+            link = channel["channel_link"]
 
-    if call.data == "subscribe":
-        bot.answer_callback_query(call.id)
+            if not link and channel["channel_username"]:
+                username = channel["channel_username"].lstrip("@")
+                link = "https://t.me/" + username
 
-        if user_id == ADMIN_ID:
-            bot.send_message(
-                call.message.chat.id,
-                "👑 Admin access is always active." if language == "en"
-                else "👑 دسترسی ادمین همیشه فعال است."
+            if link:
+                keyboard.add(
+                    types.InlineKeyboardButton(
+                        "📢 ورود به کانال",
+                        url=link
+                    )
+                )
+
+        keyboard.add(
+            types.InlineKeyboardButton(
+                "✅ عضو شدم",
+                callback_data="check_join"
             )
-            return
+        )
 
-        if is_subscribed(user_id):
-            user = get_user(user_id)
-            bot.send_message(
-                call.message.chat.id,
-                status_text(language, user.get("subscription_until"))
-            )
-            return
-
-        send_subscription_invoice(call.message.chat.id)
-
-
-# =========================
-# پیام‌های عادی
-# =========================
-
-@bot.message_handler(func=lambda m: True)
-def check_id(m):
-    user_id = m.from_user.id
-    language = get_language(user_id)
-
-    # مالک و ادمین بدون اشتراک دسترسی مدیریتی دارند.
-    if is_admin(user_id):
-        send_admin_panel(m.chat.id, user_id)
-        return
-
-    # کاربران عادی باید اشتراک فعال داشته باشند.
-    if not is_subscribed(user_id):
-        bot.reply_to(
-            m,
-            expired_text(language),
-            reply_markup=main_keyboard(language)
+        bot.send_message(
+            message.chat.id,
+            "⚠️ برای دریافت فایل ابتدا عضو کانال شوید.",
+            reply_markup=keyboard
         )
         return
 
-    if language == "fa":
-        bot.reply_to(m, f"کد کاربری شما: {user_id}")
-    else:
-        bot.reply_to(m, f"Your code: {user_id}")
+    send_file_to_user(message.chat.id, message.from_user, file_row)
 
 
-# =========================
-# Render Web Service
-# =========================
-# Render Web Service باید حداقل روی یک پورت HTTP گوش بدهد.
-# این سرور سبک فقط برای Health Check و Port Binding است
-# و منطق اصلی ربات را تغییر نمی‌دهد.
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import threading
+def send_file_to_user(chat_id, user, file_row):
+    try:
+        caption = file_row["caption"] or ""
+        sent_message = None
 
-PORT = int(os.getenv("PORT", "10000"))
+        if file_row["file_type"] == "document":
+            sent_message = bot.send_document(
+                chat_id,
+                file_row["file_id"],
+                caption=caption
+            )
 
+        elif file_row["file_type"] == "photo":
+            sent_message = bot.send_photo(
+                chat_id,
+                file_row["file_id"],
+                caption=caption
+            )
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/", "/health", "/healthz"):
-            body = b"OK"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+        elif file_row["file_type"] == "video":
+            sent_message = bot.send_video(
+                chat_id,
+                file_row["file_id"],
+                caption=caption
+            )
+
+        elif file_row["file_type"] == "audio":
+            sent_message = bot.send_audio(
+                chat_id,
+                file_row["file_id"],
+                caption=caption
+            )
+
+        elif file_row["file_type"] == "voice":
+            sent_message = bot.send_voice(
+                chat_id,
+                file_row["file_id"],
+                caption=caption
+            )
+
         else:
-            self.send_response(404)
-            self.end_headers()
+            sent_message = bot.send_document(
+                chat_id,
+                file_row["file_id"],
+                caption=caption
+            )
 
-    def log_message(self, format, *args):
-        # لاگ‌های اضافی Health Check را نمایش نده.
+        execute(
+            "UPDATE files SET downloads = downloads + 1 WHERE id = ?",
+            (file_row["id"],),
+            commit=True
+        )
+
+        execute(
+            """
+            INSERT INTO downloads
+            (file_id, user_id, username, timestamp)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                file_row["id"],
+                user.id,
+                user.username or "",
+                now_text()
+            ),
+            commit=True
+        )
+
+        admin = execute(
+            "SELECT delete_after FROM settings WHERE admin_id = ?",
+            (file_row["admin_id"],),
+            fetchone=True
+        )
+
+        delete_after = (
+            admin["delete_after"]
+            if admin else DEFAULT_DELETE_AFTER
+        )
+
+        notice = bot.send_message(
+            chat_id,
+            f"✅ فایل ارسال شد\n⏱ این فایل تا {delete_after} ثانیه دیگر حذف خواهد شد"
+        )
+
+        if sent_message:
+            thread = threading.Thread(
+                target=delete_messages_later,
+                args=(chat_id, sent_message.message_id, notice.message_id, delete_after),
+                daemon=True
+            )
+            thread.start()
+
+    except Exception:
+        bot.send_message(
+            chat_id,
+            "❌ ارسال فایل با خطا مواجه شد."
+        )
+
+
+def delete_messages_later(chat_id, file_message_id, notice_message_id, seconds):
+    try:
+        time.sleep(seconds)
+
+        try:
+            bot.delete_message(chat_id, file_message_id)
+        except Exception:
+            pass
+
+        try:
+            bot.delete_message(chat_id, notice_message_id)
+        except Exception:
+            pass
+
+        bot.send_message(chat_id, "🗑 فایل حذف شد")
+
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "check_join")
+def check_join_callback(call):
+    user_id = call.from_user.id
+    token = pending_downloads.get(user_id)
+
+    if not token:
+        bot.answer_callback_query(
+            call.id,
+            "لینک دریافت پیدا نشد.",
+            show_alert=True
+        )
+        return
+
+    file_row = execute(
+        "SELECT * FROM files WHERE token = ? AND deleted = 0",
+        (token,),
+        fetchone=True
+    )
+
+    if not file_row:
+        bot.answer_callback_query(
+            call.id,
+            "فایل دیگر موجود نیست.",
+            show_alert=True
+        )
+        return
+
+    channels = execute(
+        "SELECT * FROM channels WHERE admin_id = ?",
+        (file_row["admin_id"],),
+        fetchall=True
+    )
+
+    for channel in channels:
+        try:
+            member = bot.get_chat_member(
+                channel["channel_id"],
+                user_id
+            )
+
+            if member.status in ("left", "kicked"):
+                bot.answer_callback_query(
+                    call.id,
+                    "هنوز در همه کانال‌ها عضو نشده‌اید.",
+                    show_alert=True
+                )
+                return
+
+        except Exception:
+            bot.answer_callback_query(
+                call.id,
+                "عضویت شما قابل بررسی نیست.",
+                show_alert=True
+            )
+            return
+
+    pending_downloads.pop(user_id, None)
+
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+    send_file_to_user(call.message.chat.id, call.from_user, file_row)
+
+
+# =========================
+# دریافت فایل توسط ادمین
+# =========================
+
+@bot.message_handler(content_types=[
+    "document",
+    "photo",
+    "video",
+    "audio",
+    "voice"
+])
+def upload_handler(message):
+    user_id = message.from_user.id
+
+    if user_states.get(user_id, {}).get("action") != "upload":
+        return
+
+    if not is_admin(user_id):
+        clear_state(user_id)
+        bot.send_message(message.chat.id, "⛔ اشتراک شما فعال نیست.")
+        return
+
+    file_id = None
+    file_name = ""
+    file_type = "document"
+
+    if message.document:
+        file_id = message.document.file_id
+        file_name = message.document.file_name or "document"
+        file_type = "document"
+
+    elif message.photo:
+        file_id = message.photo[-1].file_id
+        file_name = "photo.jpg"
+        file_type = "photo"
+
+    elif message.video:
+        file_id = message.video.file_id
+        file_name = message.video.file_name or "video.mp4"
+        file_type = "video"
+
+    elif message.audio:
+        file_id = message.audio.file_id
+        file_name = message.audio.file_name or "audio.mp3"
+        file_type = "audio"
+
+    elif message.voice:
+        file_id = message.voice.file_id
+        file_name = "voice.ogg"
+        file_type = "voice"
+
+    if not file_id:
+        bot.send_message(message.chat.id, "❌ نوع فایل پشتیبانی نمی‌شود.")
+        return
+
+    caption = message.caption or ""
+
+    token = secrets.token_urlsafe(8)
+
+    while execute(
+        "SELECT id FROM files WHERE token = ?",
+        (token,),
+        fetchone=True
+    ):
+        token = secrets.token_urlsafe(8)
+
+    file_db_id = execute(
+        """
+        INSERT INTO files
+        (admin_id, file_id, file_name, file_type, caption, token, upload_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+        """,
+        (
+            user_id,
+            file_id,
+            file_name,
+            file_type,
+            caption,
+            token,
+            now_text()
+        ),
+        commit=True
+    )
+
+    username = bot.get_me().username
+    link = f"https://t.me/{username}?start=file_{token}"
+
+    clear_state(user_id)
+
+    bot.send_message(
+        message.chat.id,
+        f"✅ فایل ذخیره شد.\n\n"
+        f"📄 نام: <code>{file_name}</code>\n"
+        f"🔗 لینک اختصاصی:\n{link}\n\n"
+        f"🆔 شناسه فایل: {file_db_id}",
+        reply_markup=admin_keyboard()
+    )
+
+
+# =========================
+# پنل ادمین
+# =========================
+
+@bot.message_handler(func=lambda message: True)
+def text_handler(message):
+    user_id = message.from_user.id
+    text = message.text.strip()
+
+    if text == "❌ بستن پنل":
+        clear_state(user_id)
+        bot.send_message(
+            message.chat.id,
+            "پنل بسته شد.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+
+    if text == "📤 آپلود فایل":
+        if not is_admin(user_id):
+            bot.send_message(message.chat.id, "⛔ اشتراک شما فعال نیست.")
+            return
+
+        user_states[user_id] = {"action": "upload"}
+        bot.send_message(
+            message.chat.id,
+            "📤 فایل را ارسال کنید.\n"
+            "فرمت‌های PDF، ZIP، MP4، MP3، عکس، وویس و سایر فایل‌ها پشتیبانی می‌شوند."
+        )
+        return
+
+    if text == "📂 فایل‌های من":
+        show_admin_files(message)
+        return
+
+    if text == "📊 آمار من":
+        show_admin_stats(message)
+        return
+
+    if text == "📢 مدیریت کانال‌ها":
+        channel_management(message)
+        return
+
+    if text == "⏱ تنظیم حذف خودکار":
+        if not is_owner(user_id):
+            bot.send_message(message.chat.id, "⛔ فقط مالک می‌تواند زمان حذف خودکار را تغییر دهد.")
+            return
+
+        user_states[user_id] = {"action": "owner_delete_after"}
+        bot.send_message(
+            message.chat.id,
+            f"مدت حذف خودکار را بر حسب ثانیه ارسال کنید.\n"
+            f"این مقدار برای همه ادمین‌ها اعمال می‌شود. مقدار فعلی پیش‌فرض: {DEFAULT_DELETE_AFTER}"
+        )
+        return
+
+    if text == "💳 مدیریت اشتراک‌ها":
+        if not is_owner(user_id):
+            bot.send_message(message.chat.id, "⛔ فقط مالک.")
+            return
+        bot.send_message(
+            message.chat.id,
+            "💳 مدیریت اشتراک ادمین‌ها:\n"
+            "/setadminsub USER_ID DAYS  - تعیین/تمدید اشتراک\n"
+            "/deladminsub USER_ID       - حذف اشتراک\n"
+            "/addadmin USER_ID           - افزودن ادمین با ۳۰ روز"
+        )
+        return
+
+    if text == "📢 همه کانال‌ها":
+        if not is_owner(user_id):
+            bot.send_message(message.chat.id, "⛔ فقط مالک.")
+            return
+        show_all_channels_owner(message)
+        return
+
+    if text == "💳 وضعیت اشتراک":
+        show_subscription(message)
+        return
+
+    if text == "👥 مدیریت ادمین‌ها":
+        show_admins(message)
+        return
+
+    if text == "➕ افزودن ادمین":
+        if is_owner(user_id):
+            user_states[user_id] = {"action": "add_admin"}
+            bot.send_message(message.chat.id, "آیدی عددی کاربر را ارسال کنید.")
+        return
+
+    if text == "➖ حذف ادمین":
+        if is_owner(user_id):
+            user_states[user_id] = {"action": "remove_admin"}
+            bot.send_message(message.chat.id, "آیدی عددی ادمین را ارسال کنید.")
+        return
+
+    if text == "💰 درآمد":
+        if is_owner(user_id):
+            bot.send_message(
+                message.chat.id,
+                "💰 درآمد کل:\n"
+                "برای ثبت درآمد واقعی، درگاه پرداخت باید به ربات متصل شود.\n"
+                "در حال حاضر درآمد ثبت‌شده: 0"
+            )
+        return
+
+    if text == "📊 آمار کل":
+        if is_owner(user_id):
+            show_global_stats(message)
+        return
+
+    if text == "📂 همه فایل‌ها":
+        if is_owner(user_id):
+            show_all_files(message)
+        return
+
+    state = user_states.get(user_id)
+
+    if state:
+        process_state(message, state)
         return
 
 
-def start_health_server():
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
-    print(f"Health server is running on port {PORT}...")
-    server.serve_forever()
+# =========================
+# عملیات ادمین
+# =========================
+
+def show_admin_files(message):
+    if not is_admin(message.from_user.id):
+        bot.send_message(message.chat.id, "⛔ دسترسی ندارید.")
+        return
+
+    files = execute(
+        """
+        SELECT * FROM files
+        WHERE admin_id = ? AND deleted = 0
+        ORDER BY id DESC
+        """,
+        (message.from_user.id,),
+        fetchall=True
+    )
+
+    if not files:
+        bot.send_message(message.chat.id, "📂 هنوز فایلی آپلود نکرده‌اید.")
+        return
+
+    for item in files:
+        bot.send_message(
+            message.chat.id,
+            f"📄 <b>{item['file_name']}</b>\n"
+            f"⬇️ دانلود: {item['downloads']}\n"
+            f"📅 آپلود: {item['upload_date']}\n"
+            f"🔗 توکن: <code>{item['token']}</code>",
+            reply_markup=types.InlineKeyboardMarkup(
+                keyboard=[
+                    [
+                        types.InlineKeyboardButton(
+                            "🗑 حذف",
+                            callback_data=f"delete_file:{item['id']}"
+                        ),
+                        types.InlineKeyboardButton(
+                            "✏️ ویرایش کپشن",
+                            callback_data=f"edit_caption:{item['id']}"
+                        )
+                    ],
+                    [
+                        types.InlineKeyboardButton(
+                            "📊 آمار دانلود",
+                            callback_data=f"file_stats:{item['id']}"
+                        )
+                    ]
+                ]
+            )
+        )
 
 
-threading.Thread(target=start_health_server, daemon=True).start()
+def show_admin_stats(message):
+    admin_id = message.from_user.id
 
-print("bot is on...")
-bot.infinity_polling()
+    if not is_admin(admin_id):
+        bot.send_message(message.chat.id, "⛔ دسترسی ندارید.")
+        return
+
+    files = execute(
+        "SELECT COUNT(*) AS total FROM files WHERE admin_id = ? AND deleted = 0",
+        (admin_id,),
+        fetchone=True
+    )
+
+    downloads = execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM downloads d
+        JOIN files f ON f.id = d.file_id
+        WHERE f.admin_id = ?
+        """,
+        (admin_id,),
+        fetchone=True
+    )
+
+    bot.send_message(
+        message.chat.id,
+        f"📊 آمار شما:\n\n"
+        f"📂 تعداد فایل‌ها: {files['total']}\n"
+        f"⬇️ تعداد دانلودها: {downloads['total']}"
+    )
+
+
+def show_subscription(message):
+    admin = get_admin(message.from_user.id)
+
+    if not admin:
+        bot.send_message(message.chat.id, "⛔ ادمین نیستید.")
+        return
+
+    bot.send_message(
+        message.chat.id,
+        f"💳 وضعیت اشتراک: {admin['status']}\n"
+        f"📅 تاریخ پایان: {admin['expire_at']}"
+    )
+
+
+def channel_management(message):
+    if not is_admin(message.from_user.id):
+        bot.send_message(message.chat.id, "⛔ دسترسی ندارید.")
+        return
+
+    channels = execute(
+        "SELECT * FROM channels WHERE admin_id = ?",
+        (message.from_user.id,),
+        fetchall=True
+    )
+
+    text = "📢 کانال‌های اجباری:\n\n"
+
+    if not channels:
+        text += "هیچ کانالی ثبت نشده است."
+    else:
+        for channel in channels:
+            text += (
+                f"🆔 {channel['channel_id']}\n"
+                f"🔗 {channel['channel_link'] or '-'}\n\n"
+            )
+
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "➕ افزودن کانال",
+            callback_data="add_channel"
+        )
+    )
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "🗑 حذف همه کانال‌ها",
+            callback_data="clear_channels"
+        )
+    )
+
+    bot.send_message(message.chat.id, text, reply_markup=keyboard)
+
+
+# =========================
+# عملیات مالک
+# =========================
+
+def show_admins(message):
+    admins = execute(
+        "SELECT * FROM admins ORDER BY id DESC",
+        fetchall=True
+    )
+
+    if not admins:
+        bot.send_message(message.chat.id, "هیچ ادمینی ثبت نشده است.")
+        return
+
+    text = "👥 لیست ادمین‌ها:\n\n"
+
+    for admin in admins:
+        file_count = execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM files
+            WHERE admin_id = ? AND deleted = 0
+            """,
+            (admin["user_id"],),
+            fetchone=True
+        )
+
+        download_count = execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM downloads d
+            JOIN files f ON f.id = d.file_id
+            WHERE f.admin_id = ?
+            """,
+            (admin["user_id"],),
+            fetchone=True
+        )
+
+        text += (
+            f"👤 {admin['name'] or '-'}\n"
+            f"🆔 {admin['user_id']}\n"
+            f"📅 پایان: {admin['expire_at']}\n"
+            f"📂 فایل‌ها: {file_count['total']}\n"
+            f"⬇️ دانلودها: {download_count['total']}\n"
+            f"📌 وضعیت: {admin['status']}\n\n"
+        )
+
+    bot.send_message(message.chat.id, text)
+
+
+def show_global_stats(message):
+    users = execute(
+        "SELECT COUNT(DISTINCT user_id) AS total FROM downloads",
+        fetchone=True
+    )
+
+    downloads = execute(
+        "SELECT COUNT(*) AS total FROM downloads",
+        fetchone=True
+    )
+
+    files = execute(
+        "SELECT COUNT(*) AS total FROM files WHERE deleted = 0",
+        fetchone=True
+    )
+
+    admins = execute(
+        "SELECT COUNT(*) AS total FROM admins",
+        fetchone=True
+    )
+
+    bot.send_message(
+        message.chat.id,
+        f"📊 آمار کلی ربات:\n\n"
+        f"👥 کاربران دریافت‌کننده: {users['total']}\n"
+        f"⬇️ کل دانلودها: {downloads['total']}\n"
+        f"📂 فایل‌های فعال: {files['total']}\n"
+        f"🛡 تعداد ادمین‌ها: {admins['total']}"
+    )
+
+
+def show_all_files(message):
+    files = execute(
+        """
+        SELECT f.*, a.name
+        FROM files f
+        LEFT JOIN admins a ON a.user_id = f.admin_id
+        WHERE f.deleted = 0
+        ORDER BY f.id DESC
+        """,
+        fetchall=True
+    )
+
+    if not files:
+        bot.send_message(message.chat.id, "هیچ فایلی وجود ندارد.")
+        return
+
+    text = "📂 فایل‌های ثبت‌شده:\n\n"
+
+    for item in files:
+        text += (
+            f"📄 {item['file_name']}\n"
+            f"👤 ادمین: {item['name'] or item['admin_id']}\n"
+            f"⬇️ دانلود: {item['downloads']}\n"
+            f"📅 تاریخ: {item['upload_date']}\n\n"
+        )
+
+    if is_owner(message.from_user.id):
+        keyboard = types.InlineKeyboardMarkup()
+        for item in files:
+            keyboard.add(types.InlineKeyboardButton(
+                f"🗑 حذف فایل {item['id']}", callback_data=f"delete_file:{item['id']}"
+            ))
+        bot.send_message(message.chat.id, text, reply_markup=keyboard)
+    else:
+        bot.send_message(message.chat.id, text)
+
+
+# =========================
+# پردازش حالت‌های مرحله‌ای
+# =========================
+
+def process_state(message, state):
+    user_id = message.from_user.id
+    action = state.get("action")
+    text = message.text.strip()
+
+    if action == "delete_after":
+        try:
+            seconds = int(text)
+
+            if seconds < 1:
+                raise ValueError
+
+            execute(
+                """
+                INSERT INTO settings (admin_id, delete_after)
+                VALUES (?, ?)
+                ON CONFLICT(admin_id)
+                DO UPDATE SET delete_after = EXCLUDED.delete_after
+                """,
+                (user_id, seconds),
+                commit=True
+            )
+
+            clear_state(user_id)
+            bot.send_message(
+                message.chat.id,
+                f"✅ مدت حذف خودکار روی {seconds} ثانیه تنظیم شد.",
+                reply_markup=admin_keyboard()
+            )
+
+        except ValueError:
+            bot.send_message(message.chat.id, "❌ فقط یک عدد مثبت ارسال کنید.")
+
+    elif action == "add_admin":
+        if not is_owner(user_id):
+            clear_state(user_id)
+            return
+
+        try:
+            target_id = int(text)
+        except ValueError:
+            bot.send_message(message.chat.id, "❌ آیدی باید عددی باشد.")
+            return
+
+        existing = get_admin(target_id)
+        expire = datetime.now() + timedelta(days=DEFAULT_SUB_DAYS)
+
+        if existing:
+            execute(
+                """
+                UPDATE admins
+                SET status = 'active', expire_at = ?
+                WHERE user_id = ?
+                """,
+                (date_text(expire), target_id),
+                commit=True
+            )
+        else:
+            execute(
+                """
+                INSERT INTO admins
+                (user_id, name, created_at, expire_at, status)
+                VALUES (?, ?, ?, ?, 'active')
+                """,
+                (
+                    target_id,
+                    str(target_id),
+                    now_text(),
+                    date_text(expire)
+                ),
+                commit=True
+            )
+
+        execute(
+            """
+            INSERT OR IGNORE INTO settings (admin_id, delete_after)
+            VALUES (?, ?)
+            """,
+            (target_id, DEFAULT_DELETE_AFTER),
+            commit=True
+        )
+
+        clear_state(user_id)
+
+        bot.send_message(
+            message.chat.id,
+            f"✅ ادمین {target_id} افزوده یا تمدید شد.",
+            reply_markup=owner_keyboard()
+        )
+
+        safe_send(
+            target_id,
+            "✅ شما به عنوان ادمین ربات فعال شدید.\nبرای ورود از /panel استفاده کنید."
+        )
+
+    elif action == "remove_admin":
+        if not is_owner(user_id):
+            clear_state(user_id)
+            return
+
+        try:
+            target_id = int(text)
+        except ValueError:
+            bot.send_message(message.chat.id, "❌ آیدی باید عددی باشد.")
+            return
+
+        execute(
+            "UPDATE admins SET status = 'blocked' WHERE user_id = ?",
+            (target_id,),
+            commit=True
+        )
+
+        clear_state(user_id)
+
+        bot.send_message(
+            message.chat.id,
+            f"✅ ادمین {target_id} مسدود شد.",
+            reply_markup=owner_keyboard()
+        )
+
+        safe_send(target_id, "⛔ دسترسی ادمینی شما مسدود شد.")
+
+
+
+# =========================
+# امکانات تکمیلی مالک
+# =========================
+
+def show_all_channels_owner(message):
+    if not is_owner(message.from_user.id):
+        bot.send_message(message.chat.id, "⛔ فقط مالک.")
+        return
+    channels = execute(
+        "SELECT c.*, a.name FROM channels c LEFT JOIN admins a ON a.user_id = c.admin_id ORDER BY c.id DESC",
+        fetchall=True
+    )
+    if not channels:
+        bot.send_message(message.chat.id, "📢 هیچ کانال اجباری ثبت نشده است.", reply_markup=owner_keyboard())
+        return
+    text = "📢 همه کانال‌های اجباری:\n\n"
+    keyboard = types.InlineKeyboardMarkup()
+    for ch in channels:
+        text += f"👤 ادمین: {ch['name'] or ch['admin_id']}\n🆔 {ch['channel_id']}\n🔗 {ch['channel_link'] or '-'}\n\n"
+        keyboard.add(types.InlineKeyboardButton(
+            f"🗑 حذف {ch['channel_id']}", callback_data=f"owner_delete_channel:{ch['id']}"
+        ))
+    keyboard.add(types.InlineKeyboardButton("🗑 حذف همه کانال‌ها", callback_data="owner_clear_channels"))
+    bot.send_message(message.chat.id, text, reply_markup=keyboard)
+
+@bot.message_handler(commands=["setadminsub"])
+def set_admin_subscription_command(message):
+    if not is_owner(message.from_user.id):
+        return
+    p=message.text.split()
+    if len(p)!=3:
+        bot.reply_to(message,"فرمت: /setadminsub USER_ID DAYS")
+        return
+    try:
+        uid,days=int(p[1]),int(p[2])
+        expire=datetime.now()+timedelta(days=days)
+        if not get_admin(uid):
+            bot.reply_to(message,"❌ این کاربر ادمین نیست.")
+            return
+        execute("UPDATE admins SET status='active', expire_at=? WHERE user_id=?",
+                (date_text(expire),uid),commit=True)
+        bot.reply_to(message,f"✅ اشتراک ادمین {uid} برای {days} روز تنظیم شد.",reply_markup=owner_keyboard())
+    except Exception as e:
+        print(e); bot.reply_to(message,"❌ اطلاعات نامعتبر است.")
+
+@bot.message_handler(commands=["deladminsub"])
+def delete_admin_subscription_command(message):
+    if not is_owner(message.from_user.id):
+        return
+    p=message.text.split()
+    if len(p)!=2:
+        bot.reply_to(message,"فرمت: /deladminsub USER_ID")
+        return
+    try:
+        uid=int(p[1])
+        execute("UPDATE admins SET status='blocked', expire_at=? WHERE user_id=?",
+                (date_text(datetime.now()),uid),commit=True)
+        bot.reply_to(message,f"✅ اشتراک/دسترسی ادمین {uid} غیرفعال شد.",reply_markup=owner_keyboard())
+    except Exception:
+        bot.reply_to(message,"❌ USER_ID نامعتبر است.")
+
+# =========================
+# Callbackهای فایل و کانال
+# =========================
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("delete_file:"))
+def delete_file_callback(call):
+    admin_id = call.from_user.id
+    file_id = int(call.data.split(":")[1])
+
+    file_row = execute(
+        "SELECT * FROM files WHERE id = ?",
+        (file_id,),
+        fetchone=True
+    )
+
+    if not file_row or (not is_owner(admin_id) and file_row["admin_id"] != admin_id):
+        bot.answer_callback_query(call.id, "دسترسی ندارید.", show_alert=True)
+        return
+
+    execute(
+        "UPDATE files SET deleted = 1 WHERE id = ?",
+        (file_id,),
+        commit=True
+    )
+
+    bot.answer_callback_query(call.id, "فایل حذف شد.")
+    bot.edit_message_text(
+        "🗑 فایل حذف شد و لینک آن غیرفعال گردید.",
+        call.message.chat.id,
+        call.message.message_id
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("edit_caption:"))
+def edit_caption_callback(call):
+    admin_id = call.from_user.id
+    file_id = int(call.data.split(":")[1])
+
+    file_row = execute(
+        "SELECT * FROM files WHERE id = ?",
+        (file_id,),
+        fetchone=True
+    )
+
+    if not file_row or (not is_owner(admin_id) and file_row["admin_id"] != admin_id):
+        bot.answer_callback_query(call.id, "دسترسی ندارید.", show_alert=True)
+        return
+
+    user_states[admin_id] = {
+        "action": "edit_caption",
+        "file_id": file_id
+    }
+
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        admin_id,
+        "✏️ کپشن جدید را ارسال کنید.\n"
+        "برای حذف کپشن، عبارت «بدون کپشن» را ارسال کنید."
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("file_stats:"))
+def file_stats_callback(call):
+    admin_id = call.from_user.id
+    file_id = int(call.data.split(":")[1])
+
+    file_row = execute(
+        "SELECT * FROM files WHERE id = ?",
+        (file_id,),
+        fetchone=True
+    )
+
+    if not file_row or (not is_owner(admin_id) and file_row["admin_id"] != admin_id):
+        bot.answer_callback_query(call.id, "دسترسی ندارید.", show_alert=True)
+        return
+
+    users = execute(
+        """
+        SELECT username, user_id, timestamp
+        FROM downloads
+        WHERE file_id = ?
+        ORDER BY id DESC
+        LIMIT 10
+        """,
+        (file_id,),
+        fetchall=True
+    )
+
+    text = (
+        f"📊 آمار فایل:\n\n"
+        f"📄 نام: {file_row['file_name']}\n"
+        f"⬇️ تعداد دانلود: {file_row['downloads']}\n"
+        f"📅 تاریخ آپلود: {file_row['upload_date']}\n\n"
+        f"👥 آخرین دریافت‌کنندگان:\n"
+    )
+
+    if not users:
+        text += "موردی ثبت نشده است."
+    else:
+        for user in users:
+            text += (
+                f"• {user['username'] or user['user_id']} - "
+                f"{user['timestamp']}\n"
+            )
+
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, text)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "add_channel")
+def add_channel_callback(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "دسترسی ندارید.", show_alert=True)
+        return
+
+    user_states[call.from_user.id] = {
+        "action": "add_channel"
+    }
+
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        call.message.chat.id,
+        "📢 اطلاعات کانال را در یک خط ارسال کنید:\n\n"
+        "فرمت پیشنهادی:\n"
+        "@channel_username | https://t.me/channel_username\n\n"
+        "ربات باید در کانال ادمین باشد."
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "clear_channels")
+def clear_channels_callback(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "دسترسی ندارید.", show_alert=True)
+        return
+
+    execute(
+        "DELETE FROM channels WHERE admin_id = ?",
+        (call.from_user.id,),
+        commit=True
+    )
+
+    bot.answer_callback_query(call.id, "کانال‌ها حذف شدند.")
+    bot.send_message(call.message.chat.id, "✅ همه کانال‌های اجباری حذف شدند.")
+
+
+# =========================
+# تکمیل حالت‌های متنی
+# =========================
+
+_old_process_state = process_state
+
+
+def process_state(message, state):
+    user_id = message.from_user.id
+    action = state.get("action")
+    text = message.text.strip()
+
+    if action == "owner_delete_after":
+        if not is_owner(user_id):
+            clear_state(user_id)
+            return
+        try:
+            seconds = int(text)
+            if seconds < 1:
+                raise ValueError
+            execute("UPDATE settings SET delete_after = ?", (seconds,), commit=True)
+            global DEFAULT_DELETE_AFTER
+            DEFAULT_DELETE_AFTER = seconds
+            clear_state(user_id)
+            bot.send_message(
+                message.chat.id,
+                f"✅ زمان حذف خودکار برای همه ادمین‌ها روی {seconds} ثانیه تنظیم شد.",
+                reply_markup=owner_keyboard()
+            )
+        except ValueError:
+            bot.send_message(message.chat.id, "❌ فقط یک عدد مثبت ارسال کنید.")
+        return
+
+    if action == "edit_caption":
+        caption = "" if text == "بدون کپشن" else text
+
+        if is_owner(user_id):
+            execute("UPDATE files SET caption = ? WHERE id = ?", (caption, state["file_id"]), commit=True)
+        else:
+            execute(
+                "UPDATE files SET caption = ? WHERE id = ? AND admin_id = ?",
+                (caption, state["file_id"], user_id),
+                commit=True
+            )
+
+        clear_state(user_id)
+        bot.send_message(
+            message.chat.id,
+            "✅ کپشن فایل ویرایش شد.",
+            reply_markup=admin_keyboard()
+        )
+        return
+
+    if action == "add_channel":
+        parts = [part.strip() for part in text.split("|")]
+
+        channel_username = parts[0]
+        channel_link = parts[1] if len(parts) > 1 else ""
+
+        if not channel_username:
+            bot.send_message(message.chat.id, "❌ اطلاعات کانال ناقص است.")
+            return
+
+        channel_id = channel_username
+
+        try:
+            bot.get_chat(channel_id)
+        except Exception:
+            bot.send_message(
+                message.chat.id,
+                "❌ کانال پیدا نشد یا ربات در کانال دسترسی لازم ندارد."
+            )
+            return
+
+        execute(
+            """
+            INSERT INTO channels
+            (admin_id, channel_id, channel_username, channel_link)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                channel_id,
+                channel_username,
+                channel_link
+            ),
+            commit=True
+        )
+
+        clear_state(user_id)
+        bot.send_message(
+            message.chat.id,
+            "✅ کانال اجباری با موفقیت ثبت شد.",
+            reply_markup=admin_keyboard()
+        )
+        return
+
+    _old_process_state(message, state)
+
+
+# =========================
+# بررسی دوره‌ای اشتراک‌ها
+# =========================
+
+def subscription_checker():
+    while True:
+        try:
+            admins = execute(
+                "SELECT * FROM admins WHERE status = 'active'",
+                fetchall=True
+            )
+
+            current_time = datetime.now()
+
+            for admin in admins:
+                try:
+                    expire_at = datetime.strptime(
+                        admin["expire_at"],
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+
+                    if expire_at <= current_time:
+                        execute(
+                            """
+                            UPDATE admins
+                            SET status = 'expired'
+                            WHERE user_id = ?
+                            """,
+                            (admin["user_id"],),
+                            commit=True
+                        )
+
+                        safe_send(
+                            admin["user_id"],
+                            "⚠️ اشتراک شما منقضی شده است.\n"
+                            "آپلود فایل و لینک‌های قبلی غیرفعال شدند."
+                        )
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        time.sleep(60)
+
+
+
+# =========================
+# مدیریت کامل کانال‌ها توسط مالک
+# =========================
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("owner_delete_channel:"))
+def owner_delete_channel_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, "⛔ فقط مالک.", show_alert=True)
+        return
+    try:
+        cid=int(call.data.split(":")[1])
+        execute("DELETE FROM channels WHERE id = ?", (cid,), commit=True)
+        bot.answer_callback_query(call.id, "کانال حذف شد.")
+        show_all_channels_owner(call.message)
+    except Exception:
+        bot.answer_callback_query(call.id, "خطا در حذف کانال.", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data == "owner_clear_channels")
+def owner_clear_channels_callback(call):
+    if not is_owner(call.from_user.id):
+        bot.answer_callback_query(call.id, "⛔ فقط مالک.", show_alert=True)
+        return
+    execute("DELETE FROM channels", commit=True)
+    bot.answer_callback_query(call.id, "همه کانال‌ها حذف شدند.")
+    bot.send_message(call.message.chat.id, "✅ همه کانال‌های اجباری همه ادمین‌ها حذف شدند.", reply_markup=owner_keyboard())
+
+@bot.message_handler(commands=["ownerchannel"])
+def owner_channel_command(message):
+    if not is_owner(message.from_user.id):
+        return
+    parts=message.text.split(maxsplit=2)
+    if len(parts)<3:
+        bot.reply_to(message, "فرمت:\n/ownerchannel ADMIN_ID @channel | https://t.me/channel")
+        return
+    try:
+        admin_id=int(parts[1])
+        channel_parts=[x.strip() for x in parts[2].split("|",1)]
+        channel_username=channel_parts[0]
+        channel_link=channel_parts[1] if len(channel_parts)>1 else ""
+        if not get_admin(admin_id):
+            bot.reply_to(message,"❌ این کاربر ادمین نیست.")
+            return
+        channel_id=channel_username
+        execute(
+            "INSERT INTO channels (admin_id, channel_id, channel_username, channel_link) VALUES (?, ?, ?, ?)",
+            (admin_id, channel_id, channel_username, channel_link),
+            commit=True
+        )
+        bot.reply_to(message,"✅ کانال اجباری برای فایل‌های این ادمین ثبت شد.",reply_markup=owner_keyboard())
+    except Exception as e:
+        print("ownerchannel:",e)
+        bot.reply_to(message,"❌ اطلاعات کانال یا ساختار دیتابیس نامعتبر است.")
+
+# Visible Telegram command list.
+try:
+    bot.set_my_commands([
+        types.BotCommand("start", "شروع"),
+        types.BotCommand("panel", "پنل ادمین"),
+        types.BotCommand("owner", "پنل مالک"),
+        types.BotCommand("addadmin", "افزودن ادمین"),
+        types.BotCommand("removeadmin", "حذف ادمین"),
+        types.BotCommand("setadminsub", "تعیین اشتراک ادمین"),
+        types.BotCommand("deladminsub", "حذف اشتراک ادمین"),
+        types.BotCommand("ownerchannel", "افزودن کانال برای ادمین"),
+    ])
+except Exception as e:
+    print("Command menu error:", e)
+
+# =========================
+# اجرای برنامه
+# =========================
+
+
+if __name__ == "__main__":
+    # ساخت/آماده‌سازی دیتابیس
+    init_database()
+
+    # اجرای Flask در Thread جداگانه تا با Telegram polling تداخل نداشته باشد
+    flask_thread = threading.Thread(
+        target=run_flask,
+        daemon=True,
+        name="flask-server"
+    )
+    flask_thread.start()
+
+    # بررسی دوره‌ای اشتراک‌ها
+    checker_thread = threading.Thread(
+        target=subscription_checker,
+        daemon=True,
+        name="subscription-checker"
+    )
+    checker_thread.start()
+
+    print("ربات با موفقیت اجرا شد.")
+    print("Flask health server نیز در پس‌زمینه اجرا شد.")
+
+    # Telegram polling
+    while True:
+        try:
+            bot.infinity_polling(
+                skip_pending=True,
+                timeout=60,
+                long_polling_timeout=60
+            )
+        except Exception as error:
+            print("خطای polling:", error)
+            time.sleep(5)
