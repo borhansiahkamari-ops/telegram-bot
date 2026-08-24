@@ -1,3 +1,7 @@
+import os
+import threading
+import time
+import requests
 import telebot
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telebot import types
@@ -7,6 +11,58 @@ bot = telebot.TeleBot(TOKEN)
 
 # زبان انتخابی هر کاربر
 user_languages = {}
+
+
+# ============================================================
+# COMPATIBILITY / RENDER / SUPABASE HELPERS
+# These helpers are added without removing or changing the
+# existing bot handlers and features.
+# ============================================================
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "6914909647"))
+
+
+def supabase_enabled():
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
+
+def supabase_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def get_language(user_id):
+    return user_languages.get(user_id, "en")
+
+
+def owner_only(user_id):
+    return int(user_id) == OWNER_ID
+
+
+def save_user(user_id, **fields):
+    # Keep the existing subscription feature working when Supabase
+    # is configured, while remaining safe when it is not configured.
+    if not supabase_enabled():
+        return False
+
+    payload = {"user_id": int(user_id), **fields}
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/users"
+
+    try:
+        headers = {
+            **supabase_headers(),
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        return r.ok
+    except Exception as e:
+        print("save_user error:", e)
+        return False
+
 
 
 def language_keyboard():
@@ -200,7 +256,7 @@ def owner_management_input_final(m):
 # Set WEBHOOK_URL in Render to the service URL (e.g. https://your-service.onrender.com).
 # If WEBHOOK_URL is absent, the bot safely falls back to polling.
 # ============================================================
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip().rstrip("/")
+WEBHOOK_URL = (os.getenv("WEBHOOK_URL", "").strip() or os.getenv("RENDER_EXTERNAL_URL", "").strip()).rstrip("/")
 PORT = int(os.getenv("PORT", "10000"))
 
 class _WebhookHandler(BaseHTTPRequestHandler):
@@ -253,6 +309,60 @@ def _configure_telegram_webhook():
         print("Webhook setup error:", e)
         return False
 
+
+
+# Added from bot_render_webhook(1).py — kept separate so existing code is not removed.
+try:
+    from flask import Flask, request
+except Exception:
+    Flask = None
+    request = None
+
+
+# ============================================================
+# ADDITIONAL FLASK / RENDER WEBHOOK SUPPORT FROM bot_render_webhook(1).py
+# This block is added without deleting the original webhook server above.
+# ============================================================
+if Flask is not None:
+    render_app = Flask(__name__)
+
+    @render_app.route("/", methods=["GET"])
+    def render_home():
+        return "Bot is running!", 200
+
+    @render_app.route("/health", methods=["GET"])
+    def render_health():
+        return "OK", 200
+
+    RENDER_WEBHOOK_PATH = "/telegram-webhook"
+    RENDER_WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+
+    @render_app.route(RENDER_WEBHOOK_PATH, methods=["POST"])
+    def render_telegram_webhook():
+        if RENDER_WEBHOOK_SECRET:
+            incoming = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if incoming != RENDER_WEBHOOK_SECRET:
+                return "Forbidden", 403
+        try:
+            if not request.is_json:
+                return "Bad Request", 400
+            update = types.Update.de_json(request.get_json())
+            if update:
+                bot.process_new_updates([update])
+            return "OK", 200
+        except Exception as error:
+            print("خطای webhook:", error)
+            return "OK", 200
+
+    def _start_additional_flask_server():
+        try:
+            port = int(os.getenv("PORT", str(PORT)))
+        except (TypeError, ValueError):
+            port = PORT
+        render_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
+else:
+    def _start_additional_flask_server():
+        return None
 
 
 try:
