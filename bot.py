@@ -731,14 +731,10 @@ def text_handler(message):
             return
 
         user_states[user_id] = {"action": "owner_delete_after"}
-        keyboard = types.InlineKeyboardMarkup()
-        for seconds, label in [(60,"۱ دقیقه"),(300,"۵ دقیقه"),(600,"۱۰ دقیقه"),(1800,"۳۰ دقیقه"),(3600,"۱ ساعت")]:
-            keyboard.add(types.InlineKeyboardButton(label, callback_data=f"owner_expire:{seconds}"))
-        keyboard.add(types.InlineKeyboardButton("⏱ زمان دلخواه (ثانیه)", callback_data="owner_expire_custom"))
         bot.send_message(
             message.chat.id,
-            f"⏱ زمان فعلی حذف خودکار: {DEFAULT_DELETE_AFTER} ثانیه\nبرای همه ادمین‌ها اعمال می‌شود.",
-            reply_markup=keyboard
+            f"مدت حذف خودکار را بر حسب ثانیه ارسال کنید.\n"
+            f"این مقدار برای همه ادمین‌ها اعمال می‌شود. مقدار فعلی پیش‌فرض: {DEFAULT_DELETE_AFTER}"
         )
         return
 
@@ -746,7 +742,13 @@ def text_handler(message):
         if not is_owner(user_id):
             bot.send_message(message.chat.id, "⛔ فقط مالک.")
             return
-        show_owner_subscription_plans(message)
+        bot.send_message(
+            message.chat.id,
+            "💳 مدیریت اشتراک ادمین‌ها:\n"
+            "/setadminsub USER_ID DAYS  - تعیین/تمدید اشتراک\n"
+            "/deladminsub USER_ID       - حذف اشتراک\n"
+            "/addadmin USER_ID           - افزودن ادمین با ۳۰ روز"
+        )
         return
 
     if text == "📢 همه کانال‌ها":
@@ -1188,73 +1190,6 @@ def process_state(message, state):
 
 
 # =========================
-# مدیریت پیشرفته اشتراک توسط مالک
-# =========================
-
-OWNER_SUBSCRIPTION_PLANS = {
-    "free3": {"days": 3, "stars": 0, "title": "🆓 رایگان ۳ روزه"},
-    "stars30": {"days": 30, "stars": 250, "title": "⭐ ۳۰ روزه - ۲۵۰ ستاره"},
-    "stars90": {"days": 90, "stars": 650, "title": "⭐ ۹۰ روزه - ۶۵۰ ستاره"},
-    "stars365": {"days": 365, "stars": 2000, "title": "⭐ ۱ ساله - ۲۰۰۰ ستاره"},
-}
-
-def show_owner_subscription_plans(message):
-    if not is_owner(message.from_user.id):
-        bot.send_message(message.chat.id, "⛔ فقط مالک.")
-        return
-    keyboard = types.InlineKeyboardMarkup()
-    for key, plan in OWNER_SUBSCRIPTION_PLANS.items():
-        keyboard.add(types.InlineKeyboardButton(
-            plan["title"], callback_data=f"owner_subplan:{key}"
-        ))
-    keyboard.add(types.InlineKeyboardButton(
-        "📋 لیست ادمین‌ها و وضعیت اشتراک", callback_data="owner_sublist"
-    ))
-    bot.send_message(
-        message.chat.id,
-        "💳 مدیریت اشتراک‌ها\n\nنوع اشتراک را انتخاب کنید؛ سپس شناسه ادمین را ارسال کنید.",
-        reply_markup=keyboard
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("owner_subplan:"))
-def owner_subplan_callback(call):
-    if not is_owner(call.from_user.id):
-        bot.answer_callback_query(call.id, "⛔ فقط مالک.", show_alert=True)
-        return
-    key=call.data.split(":",1)[1]
-    plan=OWNER_SUBSCRIPTION_PLANS.get(key)
-    if not plan:
-        return
-    user_states[call.from_user.id] = {"action":"owner_set_plan", "plan":key}
-    bot.answer_callback_query(call.id)
-    bot.send_message(
-        call.message.chat.id,
-        f"{plan['title']} انتخاب شد.\n\n🆔 حالا USER_ID ادمین را ارسال کنید:"
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "owner_sublist")
-def owner_sublist_callback(call):
-    if not is_owner(call.from_user.id):
-        bot.answer_callback_query(call.id, "⛔ فقط مالک.", show_alert=True)
-        return
-    bot.answer_callback_query(call.id)
-    admins=execute("SELECT * FROM admins ORDER BY id DESC", fetchall=True)
-    if not admins:
-        bot.send_message(call.message.chat.id,"هیچ ادمینی ثبت نشده است.",reply_markup=owner_keyboard())
-        return
-    text="💳 وضعیت اشتراک ادمین‌ها:\n\n"
-    for a in admins:
-        text += f"👤 {a['name'] or '-'}\n🆔 {a['user_id']}\n📌 {a['status']}\n📅 {a['expire_at']}\n\n"
-    bot.send_message(call.message.chat.id,text,reply_markup=owner_keyboard())
-
-# افزودن دو گزینه به پنل مالک، بدون حذف دکمه‌های قبلی.
-_old_owner_keyboard = owner_keyboard
-def owner_keyboard():
-    keyboard = _old_owner_keyboard()
-    keyboard.row("💳 مدیریت اشتراک‌ها", "⏱ تنظیم حذف خودکار")
-    return keyboard
-
-# =========================
 # امکانات تکمیلی مالک
 # =========================
 
@@ -1472,33 +1407,6 @@ def process_state(message, state):
     action = state.get("action")
     text = message.text.strip()
 
-    if action == "owner_set_plan":
-        if not is_owner(user_id):
-            clear_state(user_id)
-            return
-        try:
-            target_id = int(text)
-            plan = OWNER_SUBSCRIPTION_PLANS[state.get("plan")]
-            if not get_admin(target_id):
-                bot.send_message(message.chat.id, "❌ این کاربر ادمین نیست.")
-                clear_state(user_id)
-                return
-            expire = datetime.now() + timedelta(days=plan["days"])
-            execute(
-                "UPDATE admins SET status='active', expire_at=? WHERE user_id=?",
-                (date_text(expire), target_id), commit=True
-            )
-            clear_state(user_id)
-            bot.send_message(
-                message.chat.id,
-                f"✅ اشتراک {target_id} روی {plan['title']} تنظیم شد.\n📅 پایان: {date_text(expire)}",
-                reply_markup=owner_keyboard()
-            )
-        except Exception as e:
-            print("owner_set_plan:", e)
-            bot.send_message(message.chat.id, "❌ USER_ID نامعتبر است.")
-        return
-
     if action == "owner_delete_after":
         if not is_owner(user_id):
             clear_state(user_id)
@@ -1634,35 +1542,6 @@ def subscription_checker():
         time.sleep(60)
 
 
-
-# انتخاب سریع زمان حذف فایل توسط مالک
-@bot.callback_query_handler(func=lambda call: call.data.startswith("owner_expire:"))
-def owner_expire_callback(call):
-    if not is_owner(call.from_user.id):
-        bot.answer_callback_query(call.id, "⛔ فقط مالک.", show_alert=True)
-        return
-    try:
-        seconds=int(call.data.split(":",1)[1])
-        execute("UPDATE settings SET delete_after = ?", (seconds,), commit=True)
-        global DEFAULT_DELETE_AFTER
-        DEFAULT_DELETE_AFTER=seconds
-        clear_state(call.from_user.id)
-        bot.answer_callback_query(call.id, "زمان ذخیره شد.")
-        bot.send_message(call.message.chat.id,
-                         f"✅ زمان حذف خودکار برای همه ادمین‌ها روی {seconds} ثانیه تنظیم شد.",
-                         reply_markup=owner_keyboard())
-    except Exception as e:
-        print("owner_expire_callback:",e)
-        bot.answer_callback_query(call.id,"خطا در ذخیره.",show_alert=True)
-
-@bot.callback_query_handler(func=lambda call: call.data == "owner_expire_custom")
-def owner_expire_custom_callback(call):
-    if not is_owner(call.from_user.id):
-        bot.answer_callback_query(call.id, "⛔ فقط مالک.", show_alert=True)
-        return
-    user_states[call.from_user.id]={"action":"owner_delete_after"}
-    bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id,"⏱ تعداد ثانیه را ارسال کنید. مثال: 1800")
 
 # =========================
 # مدیریت کامل کانال‌ها توسط مالک
