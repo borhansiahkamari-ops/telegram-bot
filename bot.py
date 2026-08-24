@@ -1,4 +1,5 @@
 import telebot
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telebot import types
 
 TOKEN = "8915241769:AAHdKt2H-zUm8GavaWONoc-FfaTyGV_vhTo"
@@ -192,5 +193,86 @@ def owner_management_input_final(m):
         except Exception: bot.reply_to(m, "❌ شناسه کاربر نامعتبر است.")
 
 
+
+# ============================================================
+# RENDER WEBHOOK / HEALTH SERVER
+# Keeps the existing bot handlers and adds Telegram webhook support.
+# Set WEBHOOK_URL in Render to the service URL (e.g. https://your-service.onrender.com).
+# If WEBHOOK_URL is absent, the bot safely falls back to polling.
+# ============================================================
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip().rstrip("/")
+PORT = int(os.getenv("PORT", "10000"))
+
+class _WebhookHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/", "/health", "/healthz"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"OK")
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path.rstrip("/") != "/telegram/webhook":
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            update = types.Update.de_json(raw.decode("utf-8"))
+            if update:
+                bot.process_new_updates([update])
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        except Exception as e:
+            print("Webhook update error:", e)
+            self.send_response(500)
+            self.end_headers()
+
+def _start_web_server():
+    server = HTTPServer(("0.0.0.0", PORT), _WebhookHandler)
+    print(f"HTTP server listening on {PORT}")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+def _configure_telegram_webhook():
+    if not WEBHOOK_URL:
+        return False
+    url = WEBHOOK_URL + "/telegram/webhook"
+    try:
+        bot.remove_webhook()
+        time.sleep(1)
+        bot.set_webhook(url=url, drop_pending_updates=False)
+        print("Telegram webhook configured:", url)
+        return True
+    except Exception as e:
+        print("Webhook setup error:", e)
+        return False
+
+
+
+try:
+    bot.set_my_commands([
+        types.BotCommand("start", "شروع / Start"),
+        types.BotCommand("language", "زبان / Language"),
+        types.BotCommand("subscribe", "اشتراک / Subscribe"),
+        types.BotCommand("status", "وضعیت اشتراک / Status"),
+        types.BotCommand("panel", "پنل مدیریت / Admin panel"),
+    ])
+except Exception as e:
+    print("Command menu setup error:", e)
+
 print("bot is on...")
-bot.infinity_polling()
+_start_web_server()
+if _configure_telegram_webhook():
+    # Webhook mode: Telegram pushes updates to Render, so a sleeping instance
+    # can be activated by an incoming HTTP request when the platform wakes it.
+    while True:
+        time.sleep(3600)
+else:
+    # Existing behavior remains available if WEBHOOK_URL is not configured.
+    bot.infinity_polling()
