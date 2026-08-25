@@ -830,6 +830,7 @@ def buy_plan_callback(call):
             title=(plan["name_fa"] if get_language(user_id) == "fa" else plan["name_en"])[:32],
             description=(f"اشتراک - {plan['days']} روز / {plan['stars']} Telegram Stars" if get_language(user_id) == "fa" else f"Subscription - {plan['days']} days / {plan['stars']} Telegram Stars")[:255],
             invoice_payload=payload,
+            provider_token="",
             currency="XTR",
             prices=[types.LabeledPrice(
                 label="Telegram Stars",
