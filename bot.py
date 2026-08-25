@@ -915,6 +915,22 @@ def successful_payment_handler(message):
             bot.send_message(user_id, tr(user_id, "payment_error"))
             return
 
+        # Verify that the invoice belongs to the same Telegram user who paid.
+        # The payload format is: sub:<plan_id>:<user_id>:<random_token>
+        try:
+            payload_user_id = int(parts[2])
+        except (TypeError, ValueError):
+            bot.send_message(user_id, tr(user_id, "payment_error"))
+            return
+
+        if payload_user_id != user_id:
+            print(
+                f"Payment user mismatch: payload_user={payload_user_id}, "
+                f"payer={user_id}"
+            )
+            bot.send_message(user_id, tr(user_id, "payment_error"))
+            return
+
         # Telegram can retry delivery of an update. Never grant the same
         # successful charge twice.
         existing = execute(
