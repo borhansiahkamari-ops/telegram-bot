@@ -1,5 +1,4 @@
 Flask
-pyTelegramBotAPI
-psycopg2-binary
 pyTelegramBotAPI>=4.36.1
+psycopg2-binary
 requests>=2.31.0
