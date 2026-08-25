@@ -8,6 +8,7 @@ import secrets
 import time
 import os
 import html
+import traceback
 from datetime import datetime, timedelta
 
 import telebot
@@ -819,25 +820,38 @@ def buy_plan_callback(call):
         return
     payload = f"sub:{plan['id']}:{user_id}:{secrets.token_urlsafe(8)}"
     try:
-        kwargs = {}
-        if plan["recurring"]:
-            kwargs["subscription_period"] = 30 * 24 * 60 * 60
+        # IMPORTANT: Start with a simple one-time Telegram Stars invoice.
+        # This avoids recurring-subscription parameters while we verify the
+        # basic Stars payment flow. The plan still grants its configured days.
+        # Telegram requires XTR for digital goods/services.
+        # provider_token is intentionally omitted for XTR invoices.
         bot.send_invoice(
             user_id,
             title=(plan["name_fa"] if get_language(user_id) == "fa" else plan["name_en"])[:32],
             description=(f"اشتراک - {plan['days']} روز / {plan['stars']} Telegram Stars" if get_language(user_id) == "fa" else f"Subscription - {plan['days']} days / {plan['stars']} Telegram Stars")[:255],
             invoice_payload=payload,
-            provider_token="",
             currency="XTR",
             prices=[types.LabeledPrice(
                 label="Telegram Stars",
                 amount=int(plan["stars"])
-            )],
-            **kwargs
+            )]
         )
         bot.answer_callback_query(call.id)
+        print(
+            f"Stars invoice sent successfully: user={user_id}, plan={plan['id']}, "
+            f"stars={int(plan['stars'])}, days={int(plan['days'])}"
+        )
     except Exception as error:
-        print("خطای ارسال فاکتور:", error)
+        # Render must show the actual Telegram/API/library error instead of
+        # only the generic popup shown to the user.
+        print(
+            "TELEGRAM STARS INVOICE ERROR | "
+            f"type={type(error).__name__} | "
+            f"error_code={getattr(error, 'error_code', None)} | "
+            f"description={getattr(error, 'description', None)} | "
+            f"message={error!r}"
+        )
+        traceback.print_exc()
         bot.answer_callback_query(call.id, tr(user_id, "payment_error"), show_alert=True)
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
