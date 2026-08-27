@@ -743,11 +743,11 @@ def language_callback(call):
     except Exception:
         pass
 
-    # If /start arrived through a file link, continue that exact request
-    # only after the user has selected a language.
-    pending_token = pending_start_tokens.pop(user_id, None)
-    if pending_token:
-        request_file(call.message, pending_token)
+    # Language is selected only after a file request has been completed.
+    # If a file was already delivered, continue with the normal subscription
+    # offer now.  The file itself is never blocked by language/subscription.
+    if pending_start_tokens.pop(user_id, None):
+        send_subscription_plans(call.message.chat.id, user_id)
         return
 
     # Language is now selected; show the normal home flow in that language.
@@ -1089,19 +1089,20 @@ def start_handler(message):
     args = message.text.split(maxsplit=1)
     token = args[1][5:] if len(args) > 1 and args[1].startswith("file_") else None
 
-    # For a new user, language selection is ALWAYS the first step.
+    # FILE LINKS HAVE HIGHEST PRIORITY.
+    # Do not force a new user to choose a language or buy a subscription
+    # before the requested file flow is handled.
+    if token:
+        request_file(message, token)
+        return
+
+    # Normal /start flow (without a file request): language comes first.
     if not has_language(user_id):
-        if token:
-            pending_start_tokens[user_id] = token
         bot.send_message(
             message.chat.id,
             "🌐 زبان را انتخاب کنید / Please choose your language:",
             reply_markup=language_keyboard()
         )
-        return
-
-    if token:
-        request_file(message, token)
         return
 
     if is_owner(user_id):
@@ -1236,13 +1237,15 @@ def request_file(message, token):
         bot.send_message(message.chat.id, "❌ لینک فایل نامعتبر یا منقضی شده است.")
         return
 
+    # This check is ONLY about the owner of the file.
+    # The person requesting the file is NEVER checked for a subscription.
     admin = execute(
         "SELECT * FROM admins WHERE user_id = ?",
         (file_row["admin_id"],),
         fetchone=True
     )
 
-    if not admin or not is_admin(admin["user_id"]):
+    if not admin or admin["status"] != "active":
         bot.send_message(
             message.chat.id,
             "❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است."
@@ -1304,104 +1307,102 @@ def request_file(message, token):
     pending_downloads.pop(user_id, None)
     send_file_to_user(message.chat.id, message.from_user, file_row)
 
-
 def send_file_to_user(chat_id, user, file_row):
+    """Deliver the requested file. Recipient subscription is irrelevant.
+
+    The ONLY thing that can prevent delivery here is Telegram rejecting the
+    actual file send. All statistics, auto-delete and onboarding are strictly
+    after the successful send.
+    """
+    file_type = file_row["file_type"]
+    file_id = file_row["file_id"]
+    caption = file_row["caption"] or ""
+
     try:
-        caption = file_row["caption"] or ""
-        sent_message = None
-
-        if file_row["file_type"] == "document":
-            sent_message = bot.send_document(
-                chat_id,
-                file_row["file_id"],
-                caption=caption
-            )
-
-        elif file_row["file_type"] == "photo":
-            sent_message = bot.send_photo(
-                chat_id,
-                file_row["file_id"],
-                caption=caption
-            )
-
-        elif file_row["file_type"] == "video":
-            sent_message = bot.send_video(
-                chat_id,
-                file_row["file_id"],
-                caption=caption
-            )
-
-        elif file_row["file_type"] == "audio":
-            sent_message = bot.send_audio(
-                chat_id,
-                file_row["file_id"],
-                caption=caption
-            )
-
-        elif file_row["file_type"] == "voice":
-            sent_message = bot.send_voice(
-                chat_id,
-                file_row["file_id"],
-                caption=caption
-            )
-
+        if file_type == "document":
+            sent_message = bot.send_document(chat_id, file_id, caption=caption)
+        elif file_type == "photo":
+            sent_message = bot.send_photo(chat_id, file_id, caption=caption)
+        elif file_type == "video":
+            sent_message = bot.send_video(chat_id, file_id, caption=caption)
+        elif file_type == "audio":
+            sent_message = bot.send_audio(chat_id, file_id, caption=caption)
+        elif file_type == "voice":
+            sent_message = bot.send_voice(chat_id, file_id, caption=caption)
         else:
-            sent_message = bot.send_document(
+            sent_message = bot.send_document(chat_id, file_id, caption=caption)
+    except Exception as error:
+        print(
+            "FILE DELIVERY ERROR | "
+            f"chat_id={chat_id} | user_id={getattr(user, 'id', None)} | "
+            f"file_db_id={file_row.get('id')} | file_type={file_type} | "
+            f"telegram_file_id={file_id!r} | error={error!r}"
+        )
+        try:
+            bot.send_message(
                 chat_id,
-                file_row["file_id"],
-                caption=caption
+                "❌ ارسال فایل انجام نشد. لطفاً دوباره لینک فایل را باز کنید."
             )
+        except Exception:
+            pass
+        return False
 
+    # From this point the file is already in the user's chat. Nothing below
+    # is allowed to cancel or undo that delivery.
+    try:
         execute(
             "UPDATE files SET downloads = downloads + 1 WHERE id = ?",
             (file_row["id"],),
             commit=True
         )
+    except Exception as error:
+        print(f"DOWNLOAD COUNTER ERROR | {error!r}")
 
+    try:
         execute(
-            """
-            INSERT INTO downloads
-            (file_id, user_id, username, timestamp)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                file_row["id"],
-                user.id,
-                user.username or "",
-                now_text()
-            ),
+            "INSERT INTO downloads (file_id, user_id, username, timestamp) VALUES (?, ?, ?, ?)",
+            (file_row["id"], user.id, user.username or "", now_text()),
             commit=True
         )
+    except Exception as error:
+        print(f"DOWNLOAD LOG ERROR | {error!r}")
 
-        admin = execute(
+    # Auto-delete is optional and also happens only AFTER delivery.
+    try:
+        settings = execute(
             "SELECT delete_after FROM settings WHERE admin_id = ?",
             (file_row["admin_id"],),
             fetchone=True
         )
-
-        delete_after = (
-            admin["delete_after"]
-            if admin else DEFAULT_DELETE_AFTER
-        )
-
+        delete_after = int(settings["delete_after"]) if settings else DEFAULT_DELETE_AFTER
+        delete_after = max(1, delete_after)
         notice = bot.send_message(
             chat_id,
             f"✅ فایل ارسال شد\n⏱ این فایل تا {delete_after} ثانیه دیگر حذف خواهد شد"
         )
+        threading.Thread(
+            target=delete_messages_later,
+            args=(chat_id, sent_message.message_id, notice.message_id, delete_after),
+            daemon=True
+        ).start()
+    except Exception as error:
+        print(f"AUTO DELETE SETUP ERROR | {error!r}")
 
-        if sent_message:
-            thread = threading.Thread(
-                target=delete_messages_later,
-                args=(chat_id, sent_message.message_id, notice.message_id, delete_after),
-                daemon=True
+    # ONLY NOW continue with language/subscription onboarding.
+    try:
+        if not has_language(user.id):
+            bot.send_message(
+                chat_id,
+                "🌐 زبان را انتخاب کنید / Please choose your language:",
+                reply_markup=language_keyboard()
             )
-            thread.start()
+            pending_start_tokens[user.id] = "__post_file__"
+        else:
+            send_subscription_plans(chat_id, user.id)
+    except Exception as error:
+        print(f"POST FILE FLOW ERROR | {error!r}")
 
-    except Exception:
-        bot.send_message(
-            chat_id,
-            "❌ ارسال فایل با خطا مواجه شد."
-        )
+    return True
 
 
 def delete_messages_later(chat_id, file_message_id, notice_message_id, seconds):
@@ -1520,6 +1521,18 @@ def check_join_callback(call):
         pass
 
     send_file_to_user(call.message.chat.id, call.from_user, file_row)
+
+    # Only after the requested file is delivered do we ask a new user
+    # for language and then show subscription plans.
+    if not has_language(user_id):
+        pending_start_tokens[user_id] = "__post_file__"
+        bot.send_message(
+            call.message.chat.id,
+            "🌐 زبان را انتخاب کنید / Please choose your language:",
+            reply_markup=language_keyboard()
+        )
+    else:
+        send_subscription_plans(call.message.chat.id, user_id)
 
 
 # =========================
