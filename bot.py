@@ -1166,26 +1166,59 @@ def owner_handler(message):
 # =========================
 
 def get_required_channels_for_file(file_row):
+    """Return the channels that MUST be checked before this file is sent.
+
+    Priority is the file flow itself. Recipient subscription/language is
+    deliberately not involved here.
+
+    Channels configured by the file owner are always included. Channels
+    configured by the owner of the bot (OWNER_ID) are also treated as global
+    mandatory channels, matching the existing admin/owner panel behavior.
     """
-    Return only the mandatory channels configured by the admin who owns
-    this file.  Owner-global channels are intentionally not mixed into an
-    admin's file flow: an admin's own required channel controls that
-    admin's files.
-    """
-    return execute(
-        "SELECT * FROM channels WHERE admin_id = ? ORDER BY id",
-        (file_row["admin_id"],),
-        fetchall=True
-    )
+    admin_id = int(file_row["admin_id"])
+
+    if admin_id == OWNER_ID:
+        rows = execute(
+            "SELECT * FROM channels WHERE admin_id = ? ORDER BY id",
+            (admin_id,),
+            fetchall=True
+        )
+    else:
+        rows = execute(
+            """
+            SELECT * FROM channels
+            WHERE admin_id IN (?, ?)
+            ORDER BY CASE WHEN admin_id = ? THEN 0 ELSE 1 END, id
+            """,
+            (admin_id, OWNER_ID, admin_id),
+            fetchall=True
+        )
+
+    # Remove duplicates while preserving order.
+    unique = []
+    seen = set()
+    for row in rows or []:
+        key = (str(row["channel_id"]), str(row["channel_link"] or ""))
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
+    return unique
 
 
 def user_is_member_of_channel(user_id, channel_id):
-    """
-    Check the user's current Telegram membership.
-    administrator/creator/member/restricted are considered joined.
-    """
+    """Return True only when Telegram says the user is actually joined."""
     member = bot.get_chat_member(channel_id, user_id)
-    return member.status not in ("left", "kicked")
+    status = str(member.status).lower()
+
+    if status in ("creator", "administrator", "member"):
+        return True
+
+    # Telegram can return restricted for a user who is still a member, or
+    # restricted with is_member=False after leaving. Respect is_member.
+    if status == "restricted":
+        return bool(getattr(member, "is_member", False))
+
+    return False
 
 
 def build_required_channel_keyboard(channels, token):
@@ -1225,6 +1258,15 @@ def build_required_channel_keyboard(channels, token):
 
 
 def request_file(message, token):
+    """Handle a deep-link file request with the required priority.
+
+    EXACT FLOW:
+      file link -> required-channel check -> membership message/buttons
+      -> user joins -> presses I joined -> membership re-check -> file.
+
+    Recipient subscription, recipient language, admin status of the
+    recipient, and the normal home menu NEVER run before this flow.
+    """
     user_id = message.from_user.id
 
     file_row = execute(
@@ -1237,27 +1279,23 @@ def request_file(message, token):
         bot.send_message(message.chat.id, "❌ لینک فایل نامعتبر یا منقضی شده است.")
         return
 
-    # This check is ONLY about the owner of the file.
-    # The person requesting the file is NEVER checked for a subscription.
+    # Only the FILE OWNER's own file validity is checked here.
+    # The recipient's subscription is intentionally ignored.
     admin = execute(
         "SELECT * FROM admins WHERE user_id = ?",
         (file_row["admin_id"],),
         fetchone=True
     )
 
-    if not admin or admin["status"] != "active":
+    # Owner-created files do not need an admin subscription row.
+    if int(file_row["admin_id"]) != OWNER_ID and (not admin or admin["status"] != "active"):
         bot.send_message(
             message.chat.id,
             "❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است."
         )
         return
 
-    # IMPORTANT:
-    # The required channel(s) belong to the admin who owns this file.
-    # Therefore a file link from Admin A is checked against Admin A's
-    # mandatory channels, not another admin's channels.
     channels = get_required_channels_for_file(file_row)
-
     not_joined = []
 
     for channel in channels:
@@ -1265,35 +1303,27 @@ def request_file(message, token):
             if not user_is_member_of_channel(user_id, channel["channel_id"]):
                 not_joined.append(channel)
         except Exception as error:
-            # If Telegram cannot verify membership, do not release the file.
+            # Verification failure is NOT treated as membership.
             print(
-                f"Mandatory channel check failed: "
-                f"user={user_id}, channel={channel['channel_id']}, error={error}"
+                "MANDATORY CHANNEL CHECK ERROR | "
+                f"user_id={user_id} | channel_id={channel['channel_id']} | "
+                f"error={error!r}"
             )
             not_joined.append(channel)
 
     if not_joined:
-        # Keep compatibility with the existing in-memory state, while the
-        # callback itself also contains the exact token.
         pending_downloads[user_id] = token
 
         keyboard = build_required_channel_keyboard(not_joined, token)
 
-        if get_language(user_id) == "en":
-            text = (
-                "🔒 Mandatory membership\n\n"
-                "To receive this file, first join the channel(s) below.\n"
-                "After joining all required channels, press "
-                "“✅ I joined” so your membership can be verified. "
-                "If verification succeeds, the file will be sent to you."
-            )
-        else:
-            text = (
-                "🔒 عضویت اجباری\n\n"
-                "برای دریافت این فایل، ابتدا در کانال‌های زیر عضو شوید.\n"
-                "پس از عضویت در همه کانال‌ها، روی «✅ عضو شدم» بزنید تا "
-                "عضویت شما بررسی شود و در صورت تأیید، فایل برایتان ارسال شود."
-            )
+        # This is intentionally sent BEFORE language/subscription handling
+        # and is styled like the user's example screenshot.
+        text = (
+            "🌹 کاربر عزیز به ربات ما خوش آمدید\n\n"
+            "🔴 لطفاً جهت استفاده از ربات در کانال‌های لیست شده عضو شده و "
+            "بر روی دکمه «عضو شدم» کلیک نمایید.\n\n"
+            "⚠️ برای دریافت فایل ابتدا باید در کانال‌های زیر عضو شوید."
+        )
 
         bot.send_message(
             message.chat.id,
@@ -1302,10 +1332,10 @@ def request_file(message, token):
         )
         return
 
-    # No mandatory channel is configured, or the user is already a member
-    # of every required channel: deliver the file immediately.
+    # No required channel is missing -> send immediately.
     pending_downloads.pop(user_id, None)
     send_file_to_user(message.chat.id, message.from_user, file_row)
+
 
 def send_file_to_user(chat_id, user, file_row):
     """Deliver the requested file. Recipient subscription is irrelevant.
