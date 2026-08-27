@@ -1051,7 +1051,13 @@ def owner_add_channel_callback(call):
         return
     user_states[call.from_user.id] = {"action": "owner_add_channel"}
     bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, "فرمت: admin_id | @channel_username | https://t.me/channel_username")
+    bot.send_message(
+        call.message.chat.id,
+        "📢 افزودن کانال اجباری برای همه فایل‌ها:\n\n"
+        "@channel_username | https://t.me/channel_username\n\n"
+        "یا اگر می‌خواهید فقط برای یک ادمین باشد:\n"
+        "admin_id | @channel_username | https://t.me/channel_username"
+    )
 
 # =========================
 # دستورهای عمومی
@@ -1184,9 +1190,11 @@ def request_file(message, token):
         )
         return
 
+    # Mandatory channels can be configured either for this admin
+    # or globally by the owner (admin_id = OWNER_ID).
     channels = execute(
-        "SELECT * FROM channels WHERE admin_id = ?",
-        (admin["user_id"],),
+        "SELECT * FROM channels WHERE admin_id IN (?, ?) ORDER BY id",
+        (admin["user_id"], OWNER_ID),
         fetchall=True
     )
 
@@ -1398,9 +1406,10 @@ def check_join_callback(call):
         )
         return
 
+    # Re-check both admin-specific and owner-global mandatory channels.
     channels = execute(
-        "SELECT * FROM channels WHERE admin_id = ?",
-        (file_row["admin_id"],),
+        "SELECT * FROM channels WHERE admin_id IN (?, ?) ORDER BY id",
+        (file_row["admin_id"], OWNER_ID),
         fetchall=True
     )
 
@@ -2317,34 +2326,66 @@ def process_state(message, state):
         if not is_owner(user_id):
             clear_state(user_id)
             return
+
         parts = [part.strip() for part in text.split("|")]
         if len(parts) < 2:
             bot.send_message(message.chat.id, "❌ فرمت ناقص است.")
             return
-        try:
+
+        # Two supported formats:
+        # 1) @channel | https://t.me/channel  -> global for all files
+        # 2) admin_id | @channel | https://t.me/channel -> only that admin
+        if parts[0].lstrip("-").isdigit():
             target_admin = int(parts[0])
-        except ValueError:
-            bot.send_message(message.chat.id, "❌ admin_id باید عددی باشد.")
-            return
-        channel_username = parts[1]
-        channel_link = parts[2] if len(parts) > 2 else ""
+            channel_username = parts[1]
+            channel_link = parts[2] if len(parts) > 2 else ""
+            if not get_admin(target_admin):
+                bot.send_message(message.chat.id, "❌ این ادمین در ربات ثبت نشده است.")
+                return
+        else:
+            target_admin = OWNER_ID
+            channel_username = parts[0]
+            channel_link = parts[1]
 
-        if not get_admin(target_admin):
-            bot.send_message(message.chat.id, "❌ این ادمین در ربات ثبت نشده است.")
+        if not channel_username:
+            bot.send_message(message.chat.id, "❌ نام/آیدی کانال خالی است.")
             return
 
+        # Store the actual Telegram chat identifier in channel_id.
+        # For public channels @username works directly with get_chat/get_chat_member.
+        channel_id = channel_username
         try:
-            bot.get_chat(channel_username)
+            chat = bot.get_chat(channel_id)
+            resolved_id = str(chat.id)
+            resolved_username = getattr(chat, "username", None) or channel_username
         except Exception:
-            bot.send_message(message.chat.id, "❌ کانال پیدا نشد یا ربات دسترسی لازم ندارد.")
+            bot.send_message(
+                message.chat.id,
+                "❌ کانال پیدا نشد یا ربات دسترسی لازم ندارد.\n"
+                "ربات را داخل کانال ادمین کنید و دوباره تلاش کنید."
+            )
             return
+
+        if not channel_link:
+            if resolved_username:
+                channel_link = "https://t.me/" + str(resolved_username).lstrip("@")
+            else:
+                bot.send_message(message.chat.id, "❌ لینک کانال را وارد کنید.")
+                return
+
         execute("""
             INSERT INTO channels(admin_id,channel_id,channel_username,channel_link)
             VALUES(?,?,?,?)
             ON CONFLICT DO NOTHING
-        """, (target_admin, channel_username, channel_username, channel_link), commit=True)
+        """, (target_admin, resolved_id, resolved_username, channel_link), commit=True)
+
         clear_state(user_id)
-        bot.send_message(message.chat.id, "✅ کانال اجباری ثبت شد.", reply_markup=owner_keyboard(user_id))
+        scope_text = "همه فایل‌ها" if target_admin == OWNER_ID else f"ادمین {target_admin}"
+        bot.send_message(
+            message.chat.id,
+            f"✅ کانال اجباری برای {scope_text} ثبت شد.",
+            reply_markup=owner_keyboard(user_id)
+        )
         return
 
     if action == "add_channel":
@@ -2360,13 +2401,19 @@ def process_state(message, state):
         channel_id = channel_username
 
         try:
-            bot.get_chat(channel_id)
+            chat = bot.get_chat(channel_id)
+            resolved_id = str(chat.id)
+            resolved_username = getattr(chat, "username", None) or channel_username
         except Exception:
             bot.send_message(
                 message.chat.id,
-                "❌ کانال پیدا نشد یا ربات در کانال دسترسی لازم ندارد."
+                "❌ کانال پیدا نشد یا ربات در کانال دسترسی لازم ندارد.\n"
+                "ربات را داخل کانال ادمین کنید و دوباره تلاش کنید."
             )
             return
+
+        if not channel_link and resolved_username:
+            channel_link = "https://t.me/" + str(resolved_username).lstrip("@")
 
         execute(
             """
@@ -2377,8 +2424,8 @@ def process_state(message, state):
             """,
             (
                 user_id,
-                channel_id,
-                channel_username,
+                resolved_id,
+                resolved_username,
                 channel_link
             ),
             commit=True
