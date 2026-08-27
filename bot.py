@@ -1164,6 +1164,65 @@ def owner_handler(message):
 # دریافت فایل از لینک
 # =========================
 
+def get_required_channels_for_file(file_row):
+    """
+    Return only the mandatory channels configured by the admin who owns
+    this file.  Owner-global channels are intentionally not mixed into an
+    admin's file flow: an admin's own required channel controls that
+    admin's files.
+    """
+    return execute(
+        "SELECT * FROM channels WHERE admin_id = ? ORDER BY id",
+        (file_row["admin_id"],),
+        fetchall=True
+    )
+
+
+def user_is_member_of_channel(user_id, channel_id):
+    """
+    Check the user's current Telegram membership.
+    administrator/creator/member/restricted are considered joined.
+    """
+    member = bot.get_chat_member(channel_id, user_id)
+    return member.status not in ("left", "kicked")
+
+
+def build_required_channel_keyboard(channels, token):
+    keyboard = types.InlineKeyboardMarkup()
+
+    for channel in channels:
+        link = channel["channel_link"]
+
+        if not link and channel["channel_username"]:
+            username = str(channel["channel_username"]).lstrip("@")
+            link = "https://t.me/" + username
+
+        channel_name = channel["channel_username"] or channel["channel_id"]
+        if isinstance(channel_name, str) and channel_name.startswith("@"):
+            button_text = f"📢 عضویت در {channel_name}"
+        else:
+            button_text = "📢 عضویت در کانال"
+
+        if link:
+            keyboard.add(
+                types.InlineKeyboardButton(
+                    button_text,
+                    url=link
+                )
+            )
+
+    # The callback contains the exact file token.  This means that if a
+    # user opens more than one file link, pressing "I joined" can never
+    # accidentally unlock a different pending file.
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "✅ عضو شدم",
+            callback_data=f"check_join:{token}"
+        )
+    )
+    return keyboard
+
+
 def request_file(message, token):
     user_id = message.from_user.id
 
@@ -1190,73 +1249,59 @@ def request_file(message, token):
         )
         return
 
-    # Mandatory channels can be configured either for this admin
-    # or globally by the owner (admin_id = OWNER_ID).
-    channels = execute(
-        "SELECT * FROM channels WHERE admin_id IN (?, ?) ORDER BY id",
-        (admin["user_id"], OWNER_ID),
-        fetchall=True
-    )
+    # IMPORTANT:
+    # The required channel(s) belong to the admin who owns this file.
+    # Therefore a file link from Admin A is checked against Admin A's
+    # mandatory channels, not another admin's channels.
+    channels = get_required_channels_for_file(file_row)
 
     not_joined = []
 
     for channel in channels:
         try:
-            member = bot.get_chat_member(channel["channel_id"], user_id)
-
-            if member.status in ("left", "kicked"):
+            if not user_is_member_of_channel(user_id, channel["channel_id"]):
                 not_joined.append(channel)
-
-        except Exception:
+        except Exception as error:
+            # If Telegram cannot verify membership, do not release the file.
+            print(
+                f"Mandatory channel check failed: "
+                f"user={user_id}, channel={channel['channel_id']}, error={error}"
+            )
             not_joined.append(channel)
 
     if not_joined:
-        # Save the requested file token so that "عضو شدم" can
-        # verify the user's membership and then deliver the file.
+        # Keep compatibility with the existing in-memory state, while the
+        # callback itself also contains the exact token.
         pending_downloads[user_id] = token
 
-        keyboard = types.InlineKeyboardMarkup()
+        keyboard = build_required_channel_keyboard(not_joined, token)
 
-        for channel in not_joined:
-            link = channel["channel_link"]
-
-            if not link and channel["channel_username"]:
-                username = channel["channel_username"].lstrip("@")
-                link = "https://t.me/" + username
-
-            # Show one clear join button for every mandatory channel.
-            channel_name = channel["channel_username"] or channel["channel_id"]
-            if isinstance(channel_name, str) and channel_name.startswith("@"):
-                button_text = f"📢 عضویت در {channel_name}"
-            else:
-                button_text = "📢 عضویت در کانال"
-
-            if link:
-                keyboard.add(
-                    types.InlineKeyboardButton(
-                        button_text,
-                        url=link
-                    )
-                )
-
-        # This button never grants access by itself. The callback below
-        # performs a fresh get_chat_member check for every required channel.
-        keyboard.add(
-            types.InlineKeyboardButton(
-                "✅ عضو شدم",
-                callback_data="check_join"
+        if get_language(user_id) == "en":
+            text = (
+                "🔒 Mandatory membership\n\n"
+                "To receive this file, first join the channel(s) below.\n"
+                "After joining all required channels, press "
+                "“✅ I joined” so your membership can be verified. "
+                "If verification succeeds, the file will be sent to you."
             )
-        )
+        else:
+            text = (
+                "🔒 عضویت اجباری\n\n"
+                "برای دریافت این فایل، ابتدا در کانال‌های زیر عضو شوید.\n"
+                "پس از عضویت در همه کانال‌ها، روی «✅ عضو شدم» بزنید تا "
+                "عضویت شما بررسی شود و در صورت تأیید، فایل برایتان ارسال شود."
+            )
 
         bot.send_message(
             message.chat.id,
-            "🔒 عضویت اجباری\n\n"
-            "برای دریافت این فایل، ابتدا در کانال‌های زیر عضو شوید.\n"
-            "پس از عضویت در همه کانال‌ها، روی «✅ عضو شدم» بزنید تا عضویت شما بررسی شود و در صورت تأیید، فایل برایتان ارسال شود.",
+            text,
             reply_markup=keyboard
         )
         return
 
+    # No mandatory channel is configured, or the user is already a member
+    # of every required channel: deliver the file immediately.
+    pending_downloads.pop(user_id, None)
     send_file_to_user(message.chat.id, message.from_user, file_row)
 
 
@@ -1379,10 +1424,17 @@ def delete_messages_later(chat_id, file_message_id, notice_message_id, seconds):
         pass
 
 
-@bot.callback_query_handler(func=lambda call: call.data == "check_join")
+@bot.callback_query_handler(func=lambda call: call.data == "check_join" or call.data.startswith("check_join:"))
 def check_join_callback(call):
     user_id = call.from_user.id
-    token = pending_downloads.get(user_id)
+
+    # New format: check_join:<exact file token>.
+    # Old format is kept for compatibility with an already-sent message.
+    token = None
+    if call.data.startswith("check_join:"):
+        token = call.data.split(":", 1)[1].strip()
+    else:
+        token = pending_downloads.get(user_id)
 
     if not token:
         bot.answer_callback_query(
@@ -1399,6 +1451,7 @@ def check_join_callback(call):
     )
 
     if not file_row:
+        pending_downloads.pop(user_id, None)
         bot.answer_callback_query(
             call.id,
             "فایل دیگر موجود نیست.",
@@ -1406,37 +1459,60 @@ def check_join_callback(call):
         )
         return
 
-    # Re-check both admin-specific and owner-global mandatory channels.
-    channels = execute(
-        "SELECT * FROM channels WHERE admin_id IN (?, ?) ORDER BY id",
-        (file_row["admin_id"], OWNER_ID),
-        fetchall=True
-    )
+    # IMPORTANT:
+    # Re-check the exact admin's mandatory channels at the moment the
+    # button is pressed. Joining the channel is never trusted by the
+    # button itself.
+    channels = get_required_channels_for_file(file_row)
 
     for channel in channels:
         try:
-            member = bot.get_chat_member(
-                channel["channel_id"],
-                user_id
-            )
+            if not user_is_member_of_channel(user_id, channel["channel_id"]):
+                if get_language(user_id) == "en":
+                    alert = (
+                        "❌ You have not joined all required channels yet. "
+                        "Join them and press “I joined” again."
+                    )
+                else:
+                    alert = (
+                        "❌ هنوز در همه کانال‌های اجباری عضو نشده‌اید.\n"
+                        "ابتدا عضو شوید و دوباره «عضو شدم» را بزنید."
+                    )
 
-            if member.status in ("left", "kicked"):
                 bot.answer_callback_query(
                     call.id,
-                    "❌ هنوز در همه کانال‌های اجباری عضو نشده‌اید.\nابتدا عضو شوید و دوباره «عضو شدم» را بزنید.",
+                    alert,
                     show_alert=True
                 )
                 return
 
-        except Exception:
+        except Exception as error:
+            print(
+                f"Mandatory channel re-check failed: "
+                f"user={user_id}, channel={channel['channel_id']}, error={error}"
+            )
+
+            alert = (
+                "❌ Your membership could not be verified."
+                if get_language(user_id) == "en"
+                else "❌ عضویت شما قابل بررسی نیست."
+            )
+
             bot.answer_callback_query(
                 call.id,
-                "عضویت شما قابل بررسی نیست.",
+                alert,
                 show_alert=True
             )
             return
 
+    # Every required channel has been verified successfully.
     pending_downloads.pop(user_id, None)
+
+    bot.answer_callback_query(
+        call.id,
+        "✅ عضویت تأیید شد." if get_language(user_id) == "fa"
+        else "✅ Membership verified."
+    )
 
     try:
         bot.delete_message(call.message.chat.id, call.message.message_id)
