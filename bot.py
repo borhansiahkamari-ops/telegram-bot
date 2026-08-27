@@ -9,7 +9,6 @@ import time
 import os
 import html
 import traceback
-import re
 from datetime import datetime, timedelta
 
 import telebot
@@ -55,19 +54,29 @@ def telegram_webhook():
             return "Bad Request", 400
 
         raw_update = request.get_json(silent=True)
-        print(f"WEBHOOK UPDATE RECEIVED | keys={list(raw_update.keys()) if isinstance(raw_update, dict) else type(raw_update).__name__}")
+        print("WEBHOOK UPDATE RECEIVED | keys=", list(raw_update.keys()) if isinstance(raw_update, dict) else type(raw_update).__name__)
         update = telebot.types.Update.de_json(raw_update)
         if update is None:
             print("WEBHOOK ERROR | Update.de_json returned None")
             return "Bad Request", 400
 
-        # Process the update immediately. The /start handler below logs the
-        # exact text Telegram delivered, so deep-link problems can be seen
-        # directly in Render logs.
+        # Log the exact Telegram message/callback route without exposing bot token.
+        try:
+            if getattr(update, "message", None):
+                print("WEBHOOK MESSAGE | text=", repr(getattr(update.message, "text", None)),
+                      "| user=", getattr(update.message.from_user, "id", None))
+            if getattr(update, "callback_query", None):
+                print("WEBHOOK CALLBACK | data=", repr(update.callback_query.data),
+                      "| user=", getattr(update.callback_query.from_user, "id", None))
+        except Exception:
+            pass
+
         bot.process_new_updates([update])
         return "OK", 200
     except Exception as error:
-        print(f"خطای webhook: {error}")
+        print("WEBHOOK PROCESSING ERROR |", repr(error))
+        traceback.print_exc()
+        # Telegram already delivered the update. Return 200 so it is not retried forever.
         return "OK", 200
 
 
@@ -82,37 +91,29 @@ def setup_telegram_webhook():
         return False
 
     try:
-        # Telegram webhooks must be HTTPS. Render's external URL is normally
-        # already HTTPS, but normalize a manually supplied value defensively.
-        base_url = WEBHOOK_URL.rstrip("/")
-        if not base_url.startswith("https://"):
-            if base_url.startswith("http://"):
-                base_url = "https://" + base_url[len("http://"):]
-            else:
-                base_url = "https://" + base_url
-
-        full_url = base_url + WEBHOOK_PATH
-
         bot.remove_webhook()
-        time.sleep(0.5)
+        time.sleep(0.2)
 
         kwargs = {}
         if WEBHOOK_SECRET:
             kwargs["secret_token"] = WEBHOOK_SECRET
 
-        result = bot.set_webhook(url=full_url, **kwargs)
-        print("Telegram webhook setWebhook result:", result)
+        full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
+        if not full_url.lower().startswith("https://"):
+            print("WEBHOOK ERROR | URL must start with https:// |", full_url)
+            return False
+        bot.set_webhook(url=full_url, **kwargs)
 
-        # Ask Telegram what webhook is actually configured. This makes a
-        # wrong/stale webhook visible immediately in Render logs.
-        info = bot.get_webhook_info()
-        print(
-            "WEBHOOK INFO | "
-            f"url={getattr(info, 'url', None)!r} | "
-            f"pending={getattr(info, 'pending_update_count', None)!r} | "
-            f"last_error={getattr(info, 'last_error_message', None)!r}"
-        )
         print("Telegram webhook فعال شد:", full_url)
+        try:
+            info = bot.get_webhook_info()
+            print(
+                "WEBHOOK INFO | url=", getattr(info, "url", None),
+                "| pending=", getattr(info, "pending_update_count", None),
+                "| last_error=", getattr(info, "last_error_message", None)
+            )
+        except Exception as info_error:
+            print("WEBHOOK INFO ERROR |", repr(info_error))
         return True
     except Exception as error:
         print("خطا در فعال‌سازی Telegram webhook:", error)
@@ -258,6 +259,8 @@ user_states = {}
 pending_downloads = {}
 # First-time /start flow: language must be selected before continuing.
 pending_start_tokens = {}
+# After a file is delivered, a new user can choose language without blocking delivery.
+pending_post_file_language = set()
 
 def now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -770,11 +773,17 @@ def language_callback(call):
     except Exception:
         pass
 
-    # Language is selected only after a file request has been completed.
-    # If a file was already delivered, continue with the normal subscription
-    # offer now.  The file itself is never blocked by language/subscription.
-    if pending_start_tokens.pop(user_id, None):
+    # File delivery no longer waits for language. This set is only used to
+    # continue the existing post-file language flow.
+    if user_id in pending_post_file_language:
+        pending_post_file_language.discard(user_id)
         send_subscription_plans(call.message.chat.id, user_id)
+        return
+
+    # Backward-compatible pending token handling for any old in-memory state.
+    pending_token = pending_start_tokens.pop(user_id, None)
+    if pending_token:
+        request_file(call.message, pending_token)
         return
 
     # Language is now selected; show the normal home flow in that language.
@@ -1112,37 +1121,35 @@ def paysupport_handler(message):
 
 @bot.message_handler(commands=["start"])
 def start_handler(message):
+    """Single entry point for Telegram deep links and normal /start.
+
+    FILE DEEP LINK HAS ABSOLUTE PRIORITY:
+    /start file_TOKEN -> file lookup -> mandatory channels -> membership -> file.
+    Recipient language/subscription/menu are NEVER checked before that flow.
+    """
     user_id = message.from_user.id
-    # Telegram deep-links arrive as /start file_<token>. Be deliberately
-    # tolerant here so the file flow is not lost because of /start@bot,
-    # extra whitespace, or a slightly different update representation.
-    raw_text = str(getattr(message, "text", "") or "").strip()
+    raw_text = (message.text or "").strip()
+
+    # Telegram normally sends: /start file_TOKEN.
+    # Also tolerate /start@BotName file_TOKEN and an accidentally pasted deep URL.
     token = None
+    parts = raw_text.split(maxsplit=1)
+    if len(parts) > 1:
+        candidate = parts[1].strip()
+        if candidate.startswith("file_"):
+            token = candidate[5:].strip()
+        elif "start=file_" in candidate:
+            token = candidate.split("start=file_", 1)[1].split("&", 1)[0].strip()
 
-    # Telegram normally delivers a deep link as: /start file_<token>.
-    # Be deliberately tolerant of /start@BotName, line breaks, copied URLs,
-    # or other harmless formatting so the file request cannot be lost.
-    match = re.search(r"(?:^|\s)file_([A-Za-z0-9_-]{1,64})(?:$|\s)", raw_text)
-    if not match:
-        match = re.search(r"[?&]start=(?:file_)?([A-Za-z0-9_-]{1,64})", raw_text)
-    if not match:
-        match = re.search(r"(?:^|[^A-Za-z0-9_-])file_([A-Za-z0-9_-]{1,64})(?:$|[^A-Za-z0-9_-])", raw_text)
-    if match:
-        token = match.group(1)
+    print(f"START ROUTE | user_id={user_id} | raw={raw_text!r} | token={token!r}")
 
-    print(
-        f"START UPDATE | user_id={user_id} | chat_id={getattr(message.chat, 'id', None)} | "
-        f"raw_text={raw_text!r} | file_token={token!r}"
-    )
-
-    # FILE LINKS HAVE HIGHEST PRIORITY.
-    # Do not force a new user to choose a language or buy a subscription
-    # before the requested file flow is handled.
     if token:
+        # IMPORTANT: return immediately. Nothing about the recipient's
+        # language/subscription is allowed to run before request_file().
         request_file(message, token)
         return
 
-    # Normal /start flow (without a file request): language comes first.
+    # Normal /start retains the existing language/admin/subscription behavior.
     if not has_language(user_id):
         bot.send_message(
             message.chat.id,
@@ -1212,181 +1219,135 @@ def owner_handler(message):
 # =========================
 
 def get_required_channels_for_file(file_row):
-    """Return mandatory channels belonging to the admin who owns the file.
-
-    The recipient's language, subscription, and role are never consulted.
-    Owner/global channels are not mixed into an admin's file flow: an admin's
-    required channel controls that admin's files.
-    """
+    """Return admin-specific + owner-global mandatory channels, without duplicates."""
     admin_id = int(file_row["admin_id"])
     rows = execute(
-        "SELECT * FROM channels WHERE admin_id = ? ORDER BY id",
-        (admin_id,),
+        "SELECT * FROM channels WHERE admin_id IN (?, ?) ORDER BY id",
+        (admin_id, OWNER_ID),
         fetchall=True
-    )
+    ) or []
 
-    unique = []
+    result = []
     seen = set()
-    for row in rows or []:
-        key = (str(row["channel_id"]), str(row["channel_link"] or ""))
-        if key not in seen:
-            seen.add(key)
-            unique.append(row)
-    return unique
+    for row in rows:
+        key = str(row.get("channel_id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+    return result
 
 
 def user_is_member_of_channel(user_id, channel_id):
-    """Check Telegram membership using the real channel chat id when possible."""
-    raw_channel_id = str(channel_id).strip()
-    telegram_chat_id = int(raw_channel_id) if raw_channel_id.lstrip("-").isdigit() else raw_channel_id
-
-    member = bot.get_chat_member(telegram_chat_id, user_id)
-    status = str(getattr(member, "status", "")).lower()
-
-    if status in ("creator", "administrator", "member"):
-        return True
-
-    if status == "restricted":
-        return bool(getattr(member, "is_member", False))
-
-    # left / kicked / unknown are NOT members.
-    return False
+    """Strict Telegram membership check."""
+    member = bot.get_chat_member(channel_id, user_id)
+    status = getattr(member, "status", None)
+    # Telegram statuses that have access to the channel.
+    return status in ("member", "administrator", "creator")
 
 
 def build_required_channel_keyboard(channels, token):
-    keyboard = types.InlineKeyboardMarkup()
-
+    kb = types.InlineKeyboardMarkup()
     for channel in channels:
-        link = channel["channel_link"]
+        link = channel.get("channel_link")
+        username = channel.get("channel_username")
+        if not link and username:
+            link = "https://t.me/" + str(username).lstrip("@")
 
-        if not link and channel["channel_username"]:
-            username = str(channel["channel_username"]).lstrip("@")
-            link = "https://t.me/" + username
-
-        channel_name = channel["channel_username"] or channel["channel_id"]
-        if isinstance(channel_name, str) and channel_name.startswith("@"):
-            button_text = f"📢 عضویت در {channel_name}"
-        else:
-            button_text = "📢 عضویت در کانال"
+        label = str(username) if username else "کانال اجباری"
+        if not label.startswith("@") and username:
+            label = "@" + label
+        button_text = f"📢 عضویت در {label}" if username else "📢 عضویت در کانال"
 
         if link:
-            keyboard.add(
-                types.InlineKeyboardButton(
-                    button_text,
-                    url=link
-                )
-            )
+            kb.add(types.InlineKeyboardButton(button_text, url=link))
 
-    # The callback contains the exact file token.  This means that if a
-    # user opens more than one file link, pressing "I joined" can never
-    # accidentally unlock a different pending file.
-    keyboard.add(
-        types.InlineKeyboardButton(
-            "✅ عضو شدم",
-            callback_data=f"check_join:{token}"
-        )
-    )
-    return keyboard
+    # Put the token in callback_data so concurrent file requests cannot collide.
+    kb.add(types.InlineKeyboardButton("✅ عضو شدم", callback_data=f"check_join:{token}"))
+    return kb
 
 
 def request_file(message, token):
-    """Handle a deep-link file request with the required priority.
-
-    EXACT FLOW:
-      file link -> required-channel check -> membership message/buttons
-      -> user joins -> presses I joined -> membership re-check -> file.
-
-    Recipient subscription, recipient language, admin status of the
-    recipient, and the normal home menu NEVER run before this flow.
-    """
+    """Absolute-priority file delivery flow."""
     user_id = message.from_user.id
+    token = (token or "").strip()
+    print(f"FILE FLOW START | user_id={user_id} | token={token!r}")
 
     file_row = execute(
         "SELECT * FROM files WHERE token = ? AND deleted = 0",
         (token,),
         fetchone=True
     )
-
     if not file_row:
+        print(f"FILE FLOW INVALID TOKEN | user_id={user_id} | token={token!r}")
         bot.send_message(message.chat.id, "❌ لینک فایل نامعتبر یا منقضی شده است.")
         return
 
-    # Only the FILE OWNER's own file validity is checked here.
-    # The recipient's subscription is intentionally ignored.
-    admin = execute(
-        "SELECT * FROM admins WHERE user_id = ?",
-        (file_row["admin_id"],),
-        fetchone=True
-    )
-
-    # Owner-created files do not need an admin subscription row.
-    if int(file_row["admin_id"]) != OWNER_ID and (not admin or admin["status"] != "active"):
-        bot.send_message(
-            message.chat.id,
-            "❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است."
-        )
+    # Validate only the FILE OWNER's permission. Never inspect recipient subscription.
+    owner_id = int(file_row["admin_id"])
+    if owner_id != OWNER_ID and not is_admin(owner_id):
+        bot.send_message(message.chat.id, "❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است.")
         return
 
     channels = get_required_channels_for_file(file_row)
     not_joined = []
-
     for channel in channels:
         try:
             if not user_is_member_of_channel(user_id, channel["channel_id"]):
                 not_joined.append(channel)
         except Exception as error:
-            # Verification failure is NOT treated as membership.
             print(
                 "MANDATORY CHANNEL CHECK ERROR | "
-                f"user_id={user_id} | channel_id={channel['channel_id']} | "
-                f"error={error!r}"
+                f"user_id={user_id} | channel_id={channel['channel_id']} | error={error!r}"
             )
+            # Verification failure is fail-closed: do not leak the file.
             not_joined.append(channel)
 
     print(
-        f"FILE FLOW | user_id={user_id} | token={token!r} | "
-        f"file_id={file_row.get('id')} | required_channels={len(channels)} | "
-        f"not_joined={len(not_joined)}"
+        f"FILE FLOW CHECK | user_id={user_id} | token={token!r} | "
+        f"file_id={file_row['id']} | channels={len(channels)} | not_joined={len(not_joined)}"
     )
 
     if not_joined:
-        pending_downloads[user_id] = token
-
         keyboard = build_required_channel_keyboard(not_joined, token)
-
-        # This is intentionally sent BEFORE language/subscription handling
-        # and is styled like the user's example screenshot.
-        text = (
-            "🌹 کاربر عزیز به ربات ما خوش آمدید\n\n"
-            "🔴 لطفاً جهت استفاده از ربات در کانال‌های لیست شده عضو شده و "
-            "بر روی دکمه «عضو شدم» کلیک نمایید.\n\n"
-            "⚠️ برای دریافت فایل ابتدا باید در کانال‌های زیر عضو شوید."
-        )
-
         bot.send_message(
             message.chat.id,
-            text,
+            "🔒 عضویت اجباری\n\n"
+            "برای دریافت فایل ابتدا باید در کانال زیر عضو شوید.\n"
+            "پس از عضویت، روی دکمه «✅ عضو شدم» بزنید تا عضویت شما بررسی شود.",
             reply_markup=keyboard
         )
         return
 
-    # No required channel is missing -> send immediately.
-    pending_downloads.pop(user_id, None)
+    # Already a member: deliver immediately.
     send_file_to_user(message.chat.id, message.from_user, file_row)
 
 
-def send_file_to_user(chat_id, user, file_row):
-    """Deliver the requested file. Recipient subscription is irrelevant.
-
-    The ONLY thing that can prevent delivery here is Telegram rejecting the
-    actual file send. All statistics, auto-delete and onboarding are strictly
-    after the successful send.
-    """
-    file_type = file_row["file_type"]
-    file_id = file_row["file_id"]
-    caption = file_row["caption"] or ""
-
+def after_file_delivery(chat_id, user_id):
+    """Continue existing language/subscription features only AFTER file delivery."""
     try:
+        if not has_language(user_id):
+            pending_post_file_language.add(user_id)
+            bot.send_message(
+                chat_id,
+                "🌐 زبان را انتخاب کنید / Please choose your language:",
+                reply_markup=language_keyboard()
+            )
+            return
+        send_subscription_plans(chat_id, user_id)
+    except Exception as error:
+        print("POST FILE FLOW ERROR |", repr(error))
+
+
+def send_file_to_user(chat_id, user, file_row):
+    """Send the Telegram file FIRST; analytics/auto-delete cannot block delivery."""
+    sent_message = None
+    try:
+        caption = file_row["caption"] or ""
+        file_type = file_row["file_type"]
+        file_id = file_row["file_id"]
+        print(f"FILE SEND START | chat_id={chat_id} | db_file_id={file_row['id']} | type={file_type}")
+
         if file_type == "document":
             sent_message = bot.send_document(chat_id, file_id, caption=caption)
         elif file_type == "photo":
@@ -1399,32 +1360,25 @@ def send_file_to_user(chat_id, user, file_row):
             sent_message = bot.send_voice(chat_id, file_id, caption=caption)
         else:
             sent_message = bot.send_document(chat_id, file_id, caption=caption)
+
+        print(f"FILE SEND SUCCESS | chat_id={chat_id} | message_id={getattr(sent_message, 'message_id', None)}")
+
     except Exception as error:
         print(
-            "FILE DELIVERY ERROR | "
-            f"chat_id={chat_id} | user_id={getattr(user, 'id', None)} | "
-            f"file_db_id={file_row.get('id')} | file_type={file_type} | "
-            f"telegram_file_id={file_id!r} | error={error!r}"
+            "FILE SEND ERROR | "
+            f"chat_id={chat_id} | db_file_id={file_row.get('id')} | "
+            f"type={file_row.get('file_type')} | telegram_file_id={file_row.get('file_id')!r} | "
+            f"error={error!r}"
         )
-        try:
-            bot.send_message(
-                chat_id,
-                "❌ ارسال فایل انجام نشد. لطفاً دوباره لینک فایل را باز کنید."
-            )
-        except Exception:
-            pass
+        traceback.print_exc()
+        bot.send_message(chat_id, "❌ ارسال فایل با خطا مواجه شد.")
         return False
 
-    # From this point the file is already in the user's chat. Nothing below
-    # is allowed to cancel or undo that delivery.
+    # Everything below is deliberately isolated from the actual file send.
     try:
-        execute(
-            "UPDATE files SET downloads = downloads + 1 WHERE id = ?",
-            (file_row["id"],),
-            commit=True
-        )
+        execute("UPDATE files SET downloads = downloads + 1 WHERE id = ?", (file_row["id"],), commit=True)
     except Exception as error:
-        print(f"DOWNLOAD COUNTER ERROR | {error!r}")
+        print("DOWNLOAD COUNTER ERROR |", repr(error))
 
     try:
         execute(
@@ -1433,43 +1387,41 @@ def send_file_to_user(chat_id, user, file_row):
             commit=True
         )
     except Exception as error:
-        print(f"DOWNLOAD LOG ERROR | {error!r}")
+        print("DOWNLOAD LOG ERROR |", repr(error))
 
-    # Auto-delete is optional and also happens only AFTER delivery.
+    delete_after = DEFAULT_DELETE_AFTER
     try:
         settings = execute(
             "SELECT delete_after FROM settings WHERE admin_id = ?",
             (file_row["admin_id"],),
             fetchone=True
         )
-        delete_after = int(settings["delete_after"]) if settings else DEFAULT_DELETE_AFTER
-        delete_after = max(1, delete_after)
+        if settings and settings.get("delete_after") is not None:
+            delete_after = int(settings["delete_after"])
+    except Exception as error:
+        print("AUTO DELETE SETTING ERROR |", repr(error))
+
+    notice = None
+    try:
         notice = bot.send_message(
             chat_id,
             f"✅ فایل ارسال شد\n⏱ این فایل تا {delete_after} ثانیه دیگر حذف خواهد شد"
         )
-        threading.Thread(
-            target=delete_messages_later,
-            args=(chat_id, sent_message.message_id, notice.message_id, delete_after),
-            daemon=True
-        ).start()
     except Exception as error:
-        print(f"AUTO DELETE SETUP ERROR | {error!r}")
+        print("DELIVERY NOTICE ERROR |", repr(error))
 
-    # ONLY NOW continue with language/subscription onboarding.
-    try:
-        if not has_language(user.id):
-            bot.send_message(
-                chat_id,
-                "🌐 زبان را انتخاب کنید / Please choose your language:",
-                reply_markup=language_keyboard()
-            )
-            pending_start_tokens[user.id] = "__post_file__"
-        else:
-            send_subscription_plans(chat_id, user.id)
-    except Exception as error:
-        print(f"POST FILE FLOW ERROR | {error!r}")
+    if sent_message:
+        try:
+            notice_id = notice.message_id if notice else 0
+            threading.Thread(
+                target=delete_messages_later,
+                args=(chat_id, sent_message.message_id, notice_id, delete_after),
+                daemon=True
+            ).start()
+        except Exception as error:
+            print("AUTO DELETE THREAD ERROR |", repr(error))
 
+    after_file_delivery(chat_id, user.id)
     return True
 
 
@@ -1493,108 +1445,55 @@ def delete_messages_later(chat_id, file_message_id, notice_message_id, seconds):
         pass
 
 
-@bot.callback_query_handler(func=lambda call: call.data == "check_join" or call.data.startswith("check_join:"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("check_join:"))
 def check_join_callback(call):
     user_id = call.from_user.id
-
-    # New format: check_join:<exact file token>.
-    # Old format is kept for compatibility with an already-sent message.
-    token = None
-    if call.data.startswith("check_join:"):
-        token = call.data.split(":", 1)[1].strip()
-    else:
-        token = pending_downloads.get(user_id)
-
-    if not token:
-        bot.answer_callback_query(
-            call.id,
-            "لینک دریافت پیدا نشد.",
-            show_alert=True
-        )
-        return
+    token = call.data.split(":", 1)[1].strip()
+    print(f"CHECK JOIN | user_id={user_id} | token={token!r}")
 
     file_row = execute(
         "SELECT * FROM files WHERE token = ? AND deleted = 0",
         (token,),
         fetchone=True
     )
-
     if not file_row:
-        pending_downloads.pop(user_id, None)
-        bot.answer_callback_query(
-            call.id,
-            "فایل دیگر موجود نیست.",
-            show_alert=True
-        )
+        bot.answer_callback_query(call.id, "فایل دیگر موجود نیست.", show_alert=True)
         return
 
-    # IMPORTANT:
-    # Re-check the exact admin's mandatory channels at the moment the
-    # button is pressed. Joining the channel is never trusted by the
-    # button itself.
     channels = get_required_channels_for_file(file_row)
-    print(
-        f"CHECK JOIN | user_id={user_id} | token={token!r} | "
-        f"required_channels={len(channels)}"
-    )
-
     for channel in channels:
         try:
             if not user_is_member_of_channel(user_id, channel["channel_id"]):
-                if get_language(user_id) == "en":
-                    alert = (
-                        "❌ You have not joined all required channels yet. "
-                        "Join them and press “I joined” again."
-                    )
-                else:
-                    alert = (
-                        "❌ هنوز در همه کانال‌های اجباری عضو نشده‌اید.\n"
-                        "ابتدا عضو شوید و دوباره «عضو شدم» را بزنید."
-                    )
-
                 bot.answer_callback_query(
                     call.id,
-                    alert,
+                    "❌ هنوز عضو کانال‌های اجباری نشده‌اید.\nابتدا عضو شوید و دوباره «عضو شدم» را بزنید.",
                     show_alert=True
                 )
                 return
-
         except Exception as error:
             print(
-                f"Mandatory channel re-check failed: "
-                f"user={user_id}, channel={channel['channel_id']}, error={error}"
+                "CHECK JOIN ERROR | "
+                f"user_id={user_id} | channel_id={channel['channel_id']} | error={error!r}"
             )
-
-            alert = (
-                "❌ Your membership could not be verified."
-                if get_language(user_id) == "en"
-                else "❌ عضویت شما قابل بررسی نیست."
-            )
-
             bot.answer_callback_query(
                 call.id,
-                alert,
+                "❌ عضویت شما قابل بررسی نیست. لطفاً چند لحظه بعد دوباره تلاش کنید.",
                 show_alert=True
             )
             return
 
-    # Every required channel has been verified successfully.
-    pending_downloads.pop(user_id, None)
-
-    bot.answer_callback_query(
-        call.id,
-        "✅ عضویت تأیید شد." if get_language(user_id) == "fa"
-        else "✅ Membership verified."
-    )
-
+    bot.answer_callback_query(call.id, "✅ عضویت تأیید شد.")
     try:
         bot.delete_message(call.message.chat.id, call.message.message_id)
     except Exception:
         pass
 
-    # send_file_to_user is responsible for delivery and, ONLY after a
-    # successful delivery, continuing to language/subscription onboarding.
-    # Do not duplicate that post-file flow here.
+    # Re-check owner validity only; recipient subscription is never checked.
+    owner_id = int(file_row["admin_id"])
+    if owner_id != OWNER_ID and not is_admin(owner_id):
+        bot.send_message(call.message.chat.id, "❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است.")
+        return
+
     send_file_to_user(call.message.chat.id, call.from_user, file_row)
 
 
@@ -1684,15 +1583,9 @@ def upload_handler(message):
     )
 
     username = bot.get_me().username
-    # Standard Telegram bot deep link. HTTPS here is the correct format;
-    # Telegram converts the `start` query parameter into `/start file_<token>`
-    # in the bot update. The webhook receives that Telegram update, not this URL.
     link = f"https://t.me/{username}?start=file_{token}"
 
     clear_state(user_id)
-
-    link_kb = types.InlineKeyboardMarkup()
-    link_kb.add(types.InlineKeyboardButton("📥 دریافت فایل", url=link))
 
     bot.send_message(
         message.chat.id,
@@ -1700,7 +1593,7 @@ def upload_handler(message):
         f"📄 نام: <code>{html.escape(file_name)}</code>\n"
         f"🔗 لینک اختصاصی:\n{link}\n\n"
         f"🆔 شناسه فایل: {file_db_id}",
-        reply_markup=link_kb
+        reply_markup=admin_keyboard(user_id)
     )
 
 
