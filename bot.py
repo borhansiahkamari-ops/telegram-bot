@@ -9,6 +9,7 @@ import time
 import os
 import html
 import traceback
+import re
 from datetime import datetime, timedelta
 
 import telebot
@@ -1086,8 +1087,16 @@ def paysupport_handler(message):
 @bot.message_handler(commands=["start"])
 def start_handler(message):
     user_id = message.from_user.id
-    args = message.text.split(maxsplit=1)
-    token = args[1][5:] if len(args) > 1 and args[1].startswith("file_") else None
+    # Telegram deep-links arrive as /start file_<token>. Be deliberately
+    # tolerant here so the file flow is not lost because of /start@bot,
+    # extra whitespace, or a slightly different update representation.
+    raw_text = str(getattr(message, "text", "") or "").strip()
+    token = None
+    match = re.search(r"(?:^|\s)file_([A-Za-z0-9_-]{1,64})(?:$|\s)", raw_text)
+    if match:
+        token = match.group(1)
+
+    print(f"START UPDATE | user_id={user_id} | raw_text={raw_text!r} | file_token={token!r}")
 
     # FILE LINKS HAVE HIGHEST PRIORITY.
     # Do not force a new user to choose a language or buy a subscription
@@ -1166,35 +1175,19 @@ def owner_handler(message):
 # =========================
 
 def get_required_channels_for_file(file_row):
-    """Return the channels that MUST be checked before this file is sent.
+    """Return mandatory channels belonging to the admin who owns the file.
 
-    Priority is the file flow itself. Recipient subscription/language is
-    deliberately not involved here.
-
-    Channels configured by the file owner are always included. Channels
-    configured by the owner of the bot (OWNER_ID) are also treated as global
-    mandatory channels, matching the existing admin/owner panel behavior.
+    The recipient's language, subscription, and role are never consulted.
+    Owner/global channels are not mixed into an admin's file flow: an admin's
+    required channel controls that admin's files.
     """
     admin_id = int(file_row["admin_id"])
+    rows = execute(
+        "SELECT * FROM channels WHERE admin_id = ? ORDER BY id",
+        (admin_id,),
+        fetchall=True
+    )
 
-    if admin_id == OWNER_ID:
-        rows = execute(
-            "SELECT * FROM channels WHERE admin_id = ? ORDER BY id",
-            (admin_id,),
-            fetchall=True
-        )
-    else:
-        rows = execute(
-            """
-            SELECT * FROM channels
-            WHERE admin_id IN (?, ?)
-            ORDER BY CASE WHEN admin_id = ? THEN 0 ELSE 1 END, id
-            """,
-            (admin_id, OWNER_ID, admin_id),
-            fetchall=True
-        )
-
-    # Remove duplicates while preserving order.
     unique = []
     seen = set()
     for row in rows or []:
@@ -1206,18 +1199,20 @@ def get_required_channels_for_file(file_row):
 
 
 def user_is_member_of_channel(user_id, channel_id):
-    """Return True only when Telegram says the user is actually joined."""
-    member = bot.get_chat_member(channel_id, user_id)
-    status = str(member.status).lower()
+    """Check Telegram membership using the real channel chat id when possible."""
+    raw_channel_id = str(channel_id).strip()
+    telegram_chat_id = int(raw_channel_id) if raw_channel_id.lstrip("-").isdigit() else raw_channel_id
+
+    member = bot.get_chat_member(telegram_chat_id, user_id)
+    status = str(getattr(member, "status", "")).lower()
 
     if status in ("creator", "administrator", "member"):
         return True
 
-    # Telegram can return restricted for a user who is still a member, or
-    # restricted with is_member=False after leaving. Respect is_member.
     if status == "restricted":
         return bool(getattr(member, "is_member", False))
 
+    # left / kicked / unknown are NOT members.
     return False
 
 
@@ -1310,6 +1305,12 @@ def request_file(message, token):
                 f"error={error!r}"
             )
             not_joined.append(channel)
+
+    print(
+        f"FILE FLOW | user_id={user_id} | token={token!r} | "
+        f"file_id={file_row.get('id')} | required_channels={len(channels)} | "
+        f"not_joined={len(not_joined)}"
+    )
 
     if not_joined:
         pending_downloads[user_id] = token
@@ -1495,6 +1496,10 @@ def check_join_callback(call):
     # button is pressed. Joining the channel is never trusted by the
     # button itself.
     channels = get_required_channels_for_file(file_row)
+    print(
+        f"CHECK JOIN | user_id={user_id} | token={token!r} | "
+        f"required_channels={len(channels)}"
+    )
 
     for channel in channels:
         try:
@@ -1550,19 +1555,10 @@ def check_join_callback(call):
     except Exception:
         pass
 
+    # send_file_to_user is responsible for delivery and, ONLY after a
+    # successful delivery, continuing to language/subscription onboarding.
+    # Do not duplicate that post-file flow here.
     send_file_to_user(call.message.chat.id, call.from_user, file_row)
-
-    # Only after the requested file is delivered do we ask a new user
-    # for language and then show subscription plans.
-    if not has_language(user_id):
-        pending_start_tokens[user_id] = "__post_file__"
-        bot.send_message(
-            call.message.chat.id,
-            "🌐 زبان را انتخاب کنید / Please choose your language:",
-            reply_markup=language_keyboard()
-        )
-    else:
-        send_subscription_plans(call.message.chat.id, user_id)
 
 
 # =========================
