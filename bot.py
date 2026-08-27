@@ -1203,9 +1203,8 @@ def request_file(message, token):
             not_joined.append(channel)
 
     if not_joined:
-        # کاربر هنوز عضو یک یا چند کانال اجباری نیست.
-        # لینک فایل در pending_downloads نگه داشته می‌شود تا بعد از عضویت
-        # با دکمه «عضو شدم» دوباره عضویت بررسی و سپس فایل ارسال شود.
+        # Save the requested file token so that "عضو شدم" can
+        # verify the user's membership and then deliver the file.
         pending_downloads[user_id] = token
 
         keyboard = types.InlineKeyboardMarkup()
@@ -1217,15 +1216,23 @@ def request_file(message, token):
                 username = channel["channel_username"].lstrip("@")
                 link = "https://t.me/" + username
 
+            # Show one clear join button for every mandatory channel.
+            channel_name = channel["channel_username"] or channel["channel_id"]
+            if isinstance(channel_name, str) and channel_name.startswith("@"):
+                button_text = f"📢 عضویت در {channel_name}"
+            else:
+                button_text = "📢 عضویت در کانال"
+
             if link:
-                channel_title = channel["channel_username"] or "کانال"
                 keyboard.add(
                     types.InlineKeyboardButton(
-                        f"📢 عضویت در {channel_title}",
+                        button_text,
                         url=link
                     )
                 )
 
+        # This button never grants access by itself. The callback below
+        # performs a fresh get_chat_member check for every required channel.
         keyboard.add(
             types.InlineKeyboardButton(
                 "✅ عضو شدم",
@@ -1235,10 +1242,9 @@ def request_file(message, token):
 
         bot.send_message(
             message.chat.id,
-            "⚠️ برای دریافت فایل، ابتدا در کانال‌های زیر عضو شوید.\n\n"
-            "1️⃣ روی دکمه هر کانال بزنید و عضو شوید.\n"
-            "2️⃣ بعد از عضویت، روی «✅ عضو شدم» بزنید.\n"
-            "3️⃣ اگر در همه کانال‌ها عضو شده باشید، فایل بلافاصله ارسال می‌شود.",
+            "🔒 عضویت اجباری\n\n"
+            "برای دریافت این فایل، ابتدا در کانال‌های زیر عضو شوید.\n"
+            "پس از عضویت در همه کانال‌ها، روی «✅ عضو شدم» بزنید تا عضویت شما بررسی شود و در صورت تأیید، فایل برایتان ارسال شود.",
             reply_markup=keyboard
         )
         return
@@ -1408,7 +1414,7 @@ def check_join_callback(call):
             if member.status in ("left", "kicked"):
                 bot.answer_callback_query(
                     call.id,
-                    "هنوز در همه کانال‌ها عضو نشده‌اید.",
+                    "❌ هنوز در همه کانال‌های اجباری عضو نشده‌اید.\nابتدا عضو شوید و دوباره «عضو شدم» را بزنید.",
                     show_alert=True
                 )
                 return
