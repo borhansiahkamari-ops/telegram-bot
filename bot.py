@@ -1203,6 +1203,9 @@ def request_file(message, token):
             not_joined.append(channel)
 
     if not_joined:
+        # کاربر هنوز عضو یک یا چند کانال اجباری نیست.
+        # لینک فایل در pending_downloads نگه داشته می‌شود تا بعد از عضویت
+        # با دکمه «عضو شدم» دوباره عضویت بررسی و سپس فایل ارسال شود.
         pending_downloads[user_id] = token
 
         keyboard = types.InlineKeyboardMarkup()
@@ -1215,9 +1218,10 @@ def request_file(message, token):
                 link = "https://t.me/" + username
 
             if link:
+                channel_title = channel["channel_username"] or "کانال"
                 keyboard.add(
                     types.InlineKeyboardButton(
-                        "📢 ورود به کانال",
+                        f"📢 عضویت در {channel_title}",
                         url=link
                     )
                 )
@@ -1231,7 +1235,10 @@ def request_file(message, token):
 
         bot.send_message(
             message.chat.id,
-            "⚠️ برای دریافت فایل ابتدا عضو کانال شوید.",
+            "⚠️ برای دریافت فایل، ابتدا در کانال‌های زیر عضو شوید.\n\n"
+            "1️⃣ روی دکمه هر کانال بزنید و عضو شوید.\n"
+            "2️⃣ بعد از عضویت، روی «✅ عضو شدم» بزنید.\n"
+            "3️⃣ اگر در همه کانال‌ها عضو شده باشید، فایل بلافاصله ارسال می‌شود.",
             reply_markup=keyboard
         )
         return
