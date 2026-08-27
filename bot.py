@@ -54,10 +54,16 @@ def telegram_webhook():
         if not request.is_json:
             return "Bad Request", 400
 
-        update = telebot.types.Update.de_json(request.get_json())
+        raw_update = request.get_json(silent=True)
+        print(f"WEBHOOK UPDATE RECEIVED | keys={list(raw_update.keys()) if isinstance(raw_update, dict) else type(raw_update).__name__}")
+        update = telebot.types.Update.de_json(raw_update)
         if update is None:
+            print("WEBHOOK ERROR | Update.de_json returned None")
             return "Bad Request", 400
 
+        # Process the update immediately. The /start handler below logs the
+        # exact text Telegram delivered, so deep-link problems can be seen
+        # directly in Render logs.
         bot.process_new_updates([update])
         return "OK", 200
     except Exception as error:
@@ -76,16 +82,36 @@ def setup_telegram_webhook():
         return False
 
     try:
+        # Telegram webhooks must be HTTPS. Render's external URL is normally
+        # already HTTPS, but normalize a manually supplied value defensively.
+        base_url = WEBHOOK_URL.rstrip("/")
+        if not base_url.startswith("https://"):
+            if base_url.startswith("http://"):
+                base_url = "https://" + base_url[len("http://"):]
+            else:
+                base_url = "https://" + base_url
+
+        full_url = base_url + WEBHOOK_PATH
+
         bot.remove_webhook()
-        time.sleep(0.2)
+        time.sleep(0.5)
 
         kwargs = {}
         if WEBHOOK_SECRET:
             kwargs["secret_token"] = WEBHOOK_SECRET
 
-        full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
-        bot.set_webhook(url=full_url, **kwargs)
+        result = bot.set_webhook(url=full_url, **kwargs)
+        print("Telegram webhook setWebhook result:", result)
 
+        # Ask Telegram what webhook is actually configured. This makes a
+        # wrong/stale webhook visible immediately in Render logs.
+        info = bot.get_webhook_info()
+        print(
+            "WEBHOOK INFO | "
+            f"url={getattr(info, 'url', None)!r} | "
+            f"pending={getattr(info, 'pending_update_count', None)!r} | "
+            f"last_error={getattr(info, 'last_error_message', None)!r}"
+        )
         print("Telegram webhook فعال شد:", full_url)
         return True
     except Exception as error:
@@ -1092,11 +1118,22 @@ def start_handler(message):
     # extra whitespace, or a slightly different update representation.
     raw_text = str(getattr(message, "text", "") or "").strip()
     token = None
+
+    # Telegram normally delivers a deep link as: /start file_<token>.
+    # Be deliberately tolerant of /start@BotName, line breaks, copied URLs,
+    # or other harmless formatting so the file request cannot be lost.
     match = re.search(r"(?:^|\s)file_([A-Za-z0-9_-]{1,64})(?:$|\s)", raw_text)
+    if not match:
+        match = re.search(r"[?&]start=(?:file_)?([A-Za-z0-9_-]{1,64})", raw_text)
+    if not match:
+        match = re.search(r"(?:^|[^A-Za-z0-9_-])file_([A-Za-z0-9_-]{1,64})(?:$|[^A-Za-z0-9_-])", raw_text)
     if match:
         token = match.group(1)
 
-    print(f"START UPDATE | user_id={user_id} | raw_text={raw_text!r} | file_token={token!r}")
+    print(
+        f"START UPDATE | user_id={user_id} | chat_id={getattr(message.chat, 'id', None)} | "
+        f"raw_text={raw_text!r} | file_token={token!r}"
+    )
 
     # FILE LINKS HAVE HIGHEST PRIORITY.
     # Do not force a new user to choose a language or buy a subscription
@@ -1647,9 +1684,15 @@ def upload_handler(message):
     )
 
     username = bot.get_me().username
+    # Standard Telegram bot deep link. HTTPS here is the correct format;
+    # Telegram converts the `start` query parameter into `/start file_<token>`
+    # in the bot update. The webhook receives that Telegram update, not this URL.
     link = f"https://t.me/{username}?start=file_{token}"
 
     clear_state(user_id)
+
+    link_kb = types.InlineKeyboardMarkup()
+    link_kb.add(types.InlineKeyboardButton("📥 دریافت فایل", url=link))
 
     bot.send_message(
         message.chat.id,
@@ -1657,7 +1700,7 @@ def upload_handler(message):
         f"📄 نام: <code>{html.escape(file_name)}</code>\n"
         f"🔗 لینک اختصاصی:\n{link}\n\n"
         f"🆔 شناسه فایل: {file_db_id}",
-        reply_markup=admin_keyboard(user_id)
+        reply_markup=link_kb
     )
 
 
