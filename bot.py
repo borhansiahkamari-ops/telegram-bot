@@ -1239,11 +1239,22 @@ def get_required_channels_for_file(file_row):
 
 
 def user_is_member_of_channel(user_id, channel_id):
-    """Strict Telegram membership check."""
+    """Check whether the user is currently a member of the required channel."""
     member = bot.get_chat_member(channel_id, user_id)
     status = getattr(member, "status", None)
-    # Telegram statuses that have access to the channel.
-    return status in ("member", "administrator", "creator")
+
+    # Normal members, admins and the creator are members.
+    if status in ("member", "administrator", "creator"):
+        return True
+
+    # Telegram may return a restricted member. If Telegram explicitly says
+    # is_member=True, the user is still a member and must be allowed to get
+    # the file.
+    if status == "restricted":
+        return bool(getattr(member, "is_member", False))
+
+    # left / kicked / unknown statuses are not members.
+    return False
 
 
 def build_required_channel_keyboard(channels, token):
@@ -1313,8 +1324,8 @@ def request_file(message, token):
         bot.send_message(
             message.chat.id,
             "🔒 عضویت اجباری\n\n"
-            "برای دریافت فایل ابتدا باید در کانال زیر عضو شوید.\n"
-            "پس از عضویت، روی دکمه «✅ عضو شدم» بزنید تا عضویت شما بررسی شود.",
+            "برای دریافت فایل ابتدا باید در کانال‌های زیر عضو شوید.\n"
+            "روی دکمه‌های عضویت بزنید، سپس «✅ عضو شدم» را انتخاب کنید تا عضویت شما بررسی شود.",
             reply_markup=keyboard
         )
         return
