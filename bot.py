@@ -534,18 +534,51 @@ def verify_file_password(password, password_hash):
     return secrets.compare_digest(hash_file_password(password), password_hash)
 
 
+def password_text(user_id, key):
+    texts = {
+        "set_password": (password_text(user_id, "set_password"), password_text(user_id, "set_password")),
+        "no_password": ("➡️ No password", "➡️ بدون رمز"),
+        "change_password": (password_text(user_id, "change_password"), password_text(user_id, "change_password")),
+        "remove_password": (password_text(user_id, "remove_password"), password_text(user_id, "remove_password")),
+        "ask_password": ("🔐 Do you want to set a password for this file?",
+                         password_text(user_id, "ask_password")),
+        "send_password": ("🔑 Send the file password:\n\nMinimum 4 characters.",
+                          "🔑 رمز عبور فایل را ارسال کنید:\n\nحداقل ۴ کاراکتر."),
+        "send_new_password": ("🔑 Send the new file password:\n\nMinimum 4 characters.",
+                              password_text(user_id, "send_new_password")),
+        "password_required": ("🔒 This file is password protected.\n\n🔑 Send the password:",
+                              password_text(user_id, "password_required")),
+        "wrong_password": ("❌ Incorrect password. Please try again.",
+                           password_text(user_id, "wrong_password")),
+        "password_too_short": ("❌ Password is too short. Use at least 4 characters.",
+                               password_text(user_id, "password_too_short")),
+        "password_set": ("✅ File password set successfully.",
+                         password_text(user_id, "password_set")),
+        "password_changed": ("✅ File password changed.",
+                             password_text(user_id, "password_changed")),
+        "password_removed": ("✅ File password removed.",
+                              password_text(user_id, "password_removed")),
+        "has_password_status": ("🔐 This file currently has a password.",
+                                password_text(user_id, "has_password_status")),
+        "no_password_status": ("🔓 This file currently has no password.",
+                               password_text(user_id, "no_password_status")),
+        "file_not_found": ("❌ File is no longer available.",
+                           password_text(user_id, "file_not_found")),
+        "no_access": ("⛔ You do not have access.",
+                      password_text(user_id, "no_access")),
+        "password_saved_no_password": ("🔓 File saved without password.",
+                                       password_text(user_id, "password_saved_no_password")),
+    }
+    pair = texts.get(key, ("", ""))
+    return pair[0] if get_language(user_id) == "en" else pair[1]
+
+
 def password_keyboard(user_id):
     kb = types.InlineKeyboardMarkup()
-    if get_language(user_id) == "en":
-        kb.row(
-            types.InlineKeyboardButton("🔐 Set password", callback_data="set_password_yes"),
-            types.InlineKeyboardButton("➡️ No password", callback_data="set_password_no")
-        )
-    else:
-        kb.row(
-            types.InlineKeyboardButton("🔐 تعیین رمز", callback_data="set_password_yes"),
-            types.InlineKeyboardButton("➡️ بدون رمز", callback_data="set_password_no")
-        )
+    kb.row(
+        types.InlineKeyboardButton(password_text(user_id, "set_password"), callback_data="set_password_yes"),
+        types.InlineKeyboardButton(password_text(user_id, "no_password"), callback_data="set_password_no")
+    )
     return kb
 
 
@@ -554,19 +587,19 @@ def file_password_management_keyboard(user_id, has_password):
     if get_language(user_id) == "en":
         if has_password:
             kb.row(
-                types.InlineKeyboardButton("🔑 Change password", callback_data="change_password:"),
-                types.InlineKeyboardButton("🔓 Remove password", callback_data="remove_password:")
+                types.InlineKeyboardButton(password_text(user_id, "change_password"), callback_data="change_password:"),
+                types.InlineKeyboardButton(password_text(user_id, "remove_password"), callback_data="remove_password:")
             )
         else:
-            kb.add(types.InlineKeyboardButton("🔐 Set password", callback_data="set_file_password:"))
+            kb.add(types.InlineKeyboardButton(password_text(user_id, "set_password"), callback_data="set_file_password:"))
     else:
         if has_password:
             kb.row(
-                types.InlineKeyboardButton("🔑 تغییر رمز", callback_data="change_password:"),
-                types.InlineKeyboardButton("🔓 حذف رمز", callback_data="remove_password:")
+                types.InlineKeyboardButton(password_text(user_id, "change_password"), callback_data="change_password:"),
+                types.InlineKeyboardButton(password_text(user_id, "remove_password"), callback_data="remove_password:")
             )
         else:
-            kb.add(types.InlineKeyboardButton("🔐 تعیین رمز", callback_data="set_file_password:"))
+            kb.add(types.InlineKeyboardButton(password_text(user_id, "set_password"), callback_data="set_file_password:"))
     return kb
 
 
@@ -1416,7 +1449,7 @@ def request_file(message, token):
         }
         bot.send_message(
             message.chat.id,
-            "🔒 این فایل دارای رمز عبور است.\n\n🔑 رمز عبور را ارسال کنید:"
+            password_text(user_id, "password_required")
         )
         return
 
@@ -1601,7 +1634,7 @@ def check_join_callback(call):
         }
         bot.send_message(
             call.message.chat.id,
-            "🔒 این فایل دارای رمز عبور است.\n\n🔑 رمز عبور را ارسال کنید:"
+            password_text(user_id, "password_required")
         )
         return
 
@@ -1709,8 +1742,8 @@ def upload_handler(message):
         f"✅ فایل ذخیره شد.\n\n"
         f"📄 نام: <code>{html.escape(file_name)}</code>\n"
         f"🔗 لینک اختصاصی:\n{link}\n\n"
-        f"🆔 شناسه فایل: {file_db_id}\n\n"
-        f"🔐 آیا می‌خواهید برای این فایل رمز عبور تعیین کنید؟",
+        f"🆔 شناسه فایل: {file_db_id}\n\n" +
+        password_text(user_id, "ask_password"),
         reply_markup=password_keyboard(user_id)
     )
 
@@ -1872,7 +1905,7 @@ def text_handler(message):
 
 def show_admin_files(message):
     if not is_admin(message.from_user.id):
-        bot.send_message(message.chat.id, "⛔ دسترسی ندارید.")
+        bot.send_message(message.chat.id, password_text(user_id, "no_access"))
         return
 
     files = execute(
@@ -1930,7 +1963,7 @@ def show_admin_stats(message):
     admin_id = message.from_user.id
 
     if not is_admin(admin_id):
-        bot.send_message(message.chat.id, "⛔ دسترسی ندارید.")
+        bot.send_message(message.chat.id, password_text(user_id, "no_access"))
         return
 
     files = execute(
@@ -1974,7 +2007,7 @@ def show_subscription(message):
 
 def channel_management(message):
     if not is_admin(message.from_user.id):
-        bot.send_message(message.chat.id, "⛔ دسترسی ندارید.")
+        bot.send_message(message.chat.id, password_text(user_id, "no_access"))
         return
 
     channels = execute(
@@ -2332,7 +2365,7 @@ def set_password_choice_callback(call):
     file_row = execute("SELECT * FROM files WHERE id = ?", (file_id,), fetchone=True)
     if not file_row or (file_row["admin_id"] != user_id and not is_owner(user_id)):
         clear_state(user_id)
-        bot.answer_callback_query(call.id, "⛔ دسترسی ندارید.", show_alert=True)
+        bot.answer_callback_query(call.id, password_text(user_id, "no_access"), show_alert=True)
         return
 
     choice = call.data.rsplit("_", 1)[1]
@@ -2342,7 +2375,7 @@ def set_password_choice_callback(call):
         bot.answer_callback_query(call.id)
         bot.send_message(
             call.message.chat.id,
-            "🔓 فایل بدون رمز ذخیره شد.",
+            password_text(user_id, "password_saved_no_password"),
             reply_markup=owner_keyboard(user_id) if is_owner(user_id) else admin_keyboard(user_id)
         )
         return
@@ -2354,8 +2387,7 @@ def set_password_choice_callback(call):
     bot.answer_callback_query(call.id)
     bot.send_message(
         call.message.chat.id,
-        "🔑 رمز عبور فایل را ارسال کنید:\n\n"
-        "حداقل ۴ کاراکتر."
+        password_text(user_id, "send_password")
     )
 
 
@@ -2366,29 +2398,29 @@ def file_password_menu_callback(call):
     file_row = execute("SELECT * FROM files WHERE id = ?", (file_id,), fetchone=True)
 
     if not file_row or (file_row["admin_id"] != user_id and not is_owner(user_id)):
-        bot.answer_callback_query(call.id, "⛔ دسترسی ندارید.", show_alert=True)
+        bot.answer_callback_query(call.id, password_text(user_id, "no_access"), show_alert=True)
         return
 
     kb = types.InlineKeyboardMarkup()
     if file_row.get("password_hash"):
         if get_language(user_id) == "en":
             kb.row(
-                types.InlineKeyboardButton("🔑 Change password", callback_data=f"change_password:{file_id}"),
-                types.InlineKeyboardButton("🔓 Remove password", callback_data=f"remove_password:{file_id}")
+                types.InlineKeyboardButton(password_text(user_id, "change_password"), callback_data=f"change_password:{file_id}"),
+                types.InlineKeyboardButton(password_text(user_id, "remove_password"), callback_data=f"remove_password:{file_id}")
             )
         else:
             kb.row(
-                types.InlineKeyboardButton("🔑 تغییر رمز", callback_data=f"change_password:{file_id}"),
-                types.InlineKeyboardButton("🔓 حذف رمز", callback_data=f"remove_password:{file_id}")
+                types.InlineKeyboardButton(password_text(user_id, "change_password"), callback_data=f"change_password:{file_id}"),
+                types.InlineKeyboardButton(password_text(user_id, "remove_password"), callback_data=f"remove_password:{file_id}")
             )
-        status = "🔐 این فایل در حال حاضر رمز دارد."
+        status = password_text(user_id, "has_password_status")
     else:
         if get_language(user_id) == "en":
-            kb.add(types.InlineKeyboardButton("🔐 Set password", callback_data=f"change_password:{file_id}"))
+            kb.add(types.InlineKeyboardButton(password_text(user_id, "set_password"), callback_data=f"change_password:{file_id}"))
             status = "🔓 This file currently has no password."
         else:
-            kb.add(types.InlineKeyboardButton("🔐 تعیین رمز", callback_data=f"change_password:{file_id}"))
-            status = "🔓 این فایل در حال حاضر بدون رمز است."
+            kb.add(types.InlineKeyboardButton(password_text(user_id, "set_password"), callback_data=f"change_password:{file_id}"))
+            status = password_text(user_id, "no_password_status")
 
     bot.answer_callback_query(call.id)
     bot.send_message(call.message.chat.id, status, reply_markup=kb)
@@ -2401,12 +2433,12 @@ def change_password_callback(call):
     file_row = execute("SELECT * FROM files WHERE id = ?", (file_id,), fetchone=True)
 
     if not file_row or (file_row["admin_id"] != user_id and not is_owner(user_id)):
-        bot.answer_callback_query(call.id, "⛔ دسترسی ندارید.", show_alert=True)
+        bot.answer_callback_query(call.id, password_text(user_id, "no_access"), show_alert=True)
         return
 
     user_states[user_id] = {"action": "set_file_password", "file_id": file_id}
     bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, "🔑 رمز جدید فایل را ارسال کنید:\n\nحداقل ۴ کاراکتر.")
+    bot.send_message(call.message.chat.id, password_text(user_id, "send_new_password"))
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("remove_password:"))
@@ -2416,14 +2448,14 @@ def remove_password_callback(call):
     file_row = execute("SELECT * FROM files WHERE id = ?", (file_id,), fetchone=True)
 
     if not file_row or (file_row["admin_id"] != user_id and not is_owner(user_id)):
-        bot.answer_callback_query(call.id, "⛔ دسترسی ندارید.", show_alert=True)
+        bot.answer_callback_query(call.id, password_text(user_id, "no_access"), show_alert=True)
         return
 
     execute("UPDATE files SET password_hash = NULL WHERE id = ?", (file_id,), commit=True)
-    bot.answer_callback_query(call.id, "✅ رمز فایل حذف شد.")
+    bot.answer_callback_query(call.id, password_text(user_id, "password_removed"))
     bot.send_message(
         call.message.chat.id,
-        "✅ رمز فایل حذف شد.",
+        password_text(user_id, "password_removed"),
         reply_markup=owner_keyboard(user_id) if is_owner(user_id) else admin_keyboard(user_id)
     )
 
@@ -2534,7 +2566,7 @@ def process_state(message, state):
 
         if not file_row:
             clear_state(user_id)
-            bot.send_message(message.chat.id, "❌ فایل دیگر موجود نیست.")
+            bot.send_message(message.chat.id, password_text(user_id, "file_not_found"))
             return
 
         owner_id = int(file_row["admin_id"])
@@ -2549,20 +2581,20 @@ def process_state(message, state):
         else:
             bot.send_message(
                 message.chat.id,
-                "❌ رمز عبور اشتباه است. دوباره تلاش کنید."
+                password_text(user_id, "wrong_password")
             )
         return
 
     if action == "set_file_password":
         if len(text) < 4:
-            bot.send_message(message.chat.id, "❌ رمز عبور خیلی کوتاه است. حداقل ۴ کاراکتر وارد کنید.")
+            bot.send_message(message.chat.id, password_text(user_id, "password_too_short"))
             return
 
         file_id = state.get("file_id")
         file_row = execute("SELECT * FROM files WHERE id = ?", (file_id,), fetchone=True)
         if not file_row or (file_row["admin_id"] != user_id and not is_owner(user_id)):
             clear_state(user_id)
-            bot.send_message(message.chat.id, "⛔ دسترسی ندارید.")
+            bot.send_message(message.chat.id, password_text(user_id, "no_access"))
             return
 
         execute(
@@ -2573,7 +2605,7 @@ def process_state(message, state):
         clear_state(user_id)
         bot.send_message(
             message.chat.id,
-            "✅ رمز فایل با موفقیت تنظیم شد.",
+            password_text(user_id, "password_set"),
             reply_markup=owner_keyboard(user_id) if is_owner(user_id) else admin_keyboard(user_id)
         )
         return
