@@ -5,6 +5,7 @@ from psycopg2.extras import RealDictCursor
 import threading
 import copy
 import secrets
+import hashlib
 import time
 import os
 import html
@@ -166,7 +167,20 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 # =========================
 # تمام پیام‌های خروجی و متن دکمه‌ها هنگام انتخاب English به انگلیسی
 # تبدیل می‌شوند. زبان در user_preferences ذخیره می‌شود.
-EN_TEXT_MAP = {'📢 کانال\u200cهای اجباری:\n\n': '📢 Mandatory channels:\n\n', '👥 لیست ادمین\u200cها:\n\n': '👥 Admin list:\n\n', '📂 فایل\u200cهای ثبت\u200cشده:\n\n': '📂 Registered files:\n\n', '📤 آپلود فایل': '📤 Upload file', '📂 فایل\u200cهای من': '📂 My files', '📊 آمار من': '📊 My stats', '📢 مدیریت کانال\u200cها': '📢 Manage channels', '💳 وضعیت اشتراک': '💳 Subscription status', '💎 تمدید / خرید اشتراک': '💎 Buy / Renew subscription', '🎁 اشتراک رایگان ۳ روزه': '🎁 3-Day Free Trial', '🌐 زبان / Language': '🌐 Language', '❌ بستن پنل': '❌ Close panel', '👥 مدیریت ادمین\u200cها': '👥 Manage admins', '➕ افزودن ادمین': '➕ Add admin', '➖ حذف ادمین': '➖ Remove admin', '💰 درآمد': '💰 Revenue', '📊 آمار کل': '📊 Global stats', '📂 همه فایل\u200cها': '📂 All files', '💎 مدیریت اشتراک\u200cها': '💎 Subscription plans', '📢 همه کانال\u200cها': '📢 All channels', '⏱ تنظیم حذف خودکار': '⏱ Auto-delete settings', '🌐 زبان انتخاب شد: فارسی': '🌐 Language selected: Persian', '🌐 زبان را انتخاب کنید / Choose your language:': '🌐 Please choose your language:', 'سلام! 👋\nاین ربات برای دریافت فایل استفاده می\u200cشود.': 'Hello! 👋\nThis bot is used to receive files.', '💎 خرید / تمدید اشتراک': '💎 Buy / Renew subscription', '🎁 دوره آزمایشی رایگان ۳ روزه': '🎁 3-Day Free Trial', '🎁 شما می\u200cتوانید ۳ روز اشتراک رایگان دریافت کنید.': '🎁 You are eligible for a 3-day free trial.', '✅ دوره آزمایشی رایگان شما فعال شد.\n⏳ مدت: ۳ روز\n📅 پایان: {expire}': '✅ Your free trial is now active.\n⏳ Duration: 3 days\n📅 Expires: {expire}', '❌ شما قبلاً از دوره آزمایشی رایگان استفاده کرده\u200cاید.': '❌ You have already used your free trial.', 'ℹ️ شما در حال حاضر یک اشتراک فعال دارید. دوره آزمایشی رایگان برای شما فعال نشد.': 'ℹ️ You already have an active subscription. The free trial was not activated.', '❌ فعال\u200cسازی دوره آزمایشی انجام نشد. لطفاً دوباره تلاش کنید.': '❌ The free trial could not be activated. Please try again.', 'فعلاً هیچ پلن فعالی وجود ندارد.': 'There are no active plans at the moment.', '💎 پلن\u200cهای اشتراک:': '💎 Subscription plans:', '🧾 فاکتور پرداخت در تلگرام برای شما ارسال شد.': '🧾 The payment invoice was sent inside Telegram.', '✅ پرداخت با موفقیت انجام شد و اشتراک شما فعال/تمدید شد.': '✅ Payment completed and your subscription was activated/extended.', '❌ پرداخت ثبت نشد یا اطلاعات پرداخت نامعتبر است.': '❌ Payment could not be registered or the payment information is invalid.', '⛔ فقط مالک به این بخش دسترسی دارد.': '⛔ Owner access only.', '⛔ شما دسترسی ادمین ندارید.': '⛔ You do not have admin access.', '💎 مدیریت پلن\u200cهای اشتراک': '💎 Subscription plan management', '➕ افزودن پلن': '➕ Add plan', '🗑 حذف پلن': '🗑 Delete plan', '📢 همه کانال\u200cهای اجباری': '📢 All mandatory channels', '⏱ تنظیم حذف خودکار برای ادمین': '⏱ Set auto-delete for an admin', '🆔 آیدی عددی ادمین را ارسال کنید.': '🆔 Send the admin numeric ID.', '⏱ زمان حذف خودکار را به ثانیه ارسال کنید.': '⏱ Send the auto-delete time in seconds.', 'فرمت: نام فارسی | نام انگلیسی | تعداد روز | تعداد ستاره | recurring\nمثال: 30 روزه | 30 Days | 30 | 250 | yes': 'Format: Persian name | English name | days | stars | recurring\nExample: 30 Days | 30 Days | 30 | 250 | yes', '✅ پلن با موفقیت اضافه شد.': '✅ Plan added successfully.', '✅ پلن حذف شد.': '✅ Plan deleted.', '❌ اطلاعات پلن نامعتبر است.': '❌ Invalid plan information.', '❌ فقط عدد مثبت ارسال کنید.': '❌ Send a positive number only.', '✅ زمان حذف خودکار ادمین تنظیم شد.': '✅ Admin auto-delete time updated.', 'هیچ کانال اجباری ثبت نشده است.': 'No mandatory channels are registered.', '✅ کانال حذف شد.': '✅ Channel removed.', 'فرمت: admin_id | @channel_username | https://t.me/channel_username': 'Format: admin_id | @channel_username | https://t.me/channel_username', '💳 پشتیبانی پرداخت\n\nاگر از حساب شما Stars کسر شده ولی اشتراک فعال نشده است، رسید پرداخت یا شناسه پرداخت Telegram را برای مالک ربات ارسال کنید.\n\nپرداخت\u200cهای Stars مستقیماً داخل تلگرام انجام می\u200cشوند.': '💳 Payment Support\n\nIf you were charged Stars but your subscription was not activated, please send the payment receipt or Telegram payment charge ID to the bot owner.\n\nTelegram Stars payments are processed inside Telegram.', '🛠 پنل مدیریت ادمین:': '🛠 Admin management panel:', '👑 پنل مالک:': '👑 Owner panel:', 'هیچ کانالی ثبت نشده است.': 'No channels are registered.', 'فایل حذف شد.': 'File deleted.', '🗑 فایل حذف شد و لینک آن غیرفعال گردید.': '🗑 File deleted and its link has been disabled.', '✏️ کپشن جدید را ارسال کنید.\nبرای حذف کپشن، عبارت «بدون کپشن» را ارسال کنید.': '✏️ Send the new caption.\nTo remove the caption, send “No caption”.', '📊 آمار فایل:\n\n📄 نام: ': '📊 File statistics:\n\n📄 Name: ', '\n⬇️ تعداد دانلود: ': '\n⬇️ Downloads: ', '\n📅 تاریخ آپلود: ': '\n📅 Upload date: ', '\n\n👥 آخرین دریافت\u200cکنندگان:\n': '\n\n👥 Recent recipients:\n', 'موردی ثبت نشده است.': 'No records found.', '📢 اطلاعات کانال را در یک خط ارسال کنید:\n\nفرمت پیشنهادی:\n@channel_username | https://t.me/channel_username\n\nربات باید در کانال ادمین باشد.': '📢 Send the channel information in one line:\n\nSuggested format:\n@channel_username | https://t.me/channel_username\n\nThe bot must be an admin in the channel.', 'کانال\u200cها حذف شدند.': 'Channels deleted.', '✅ همه کانال\u200cهای اجباری حذف شدند.': '✅ All mandatory channels have been deleted.', '🇮🇷 فارسی': '🇮🇷 Persian', '➕ افزودن کانال': '➕ Add channel', '👑 به پنل مالک خوش آمدید.\nبرای ورود به پنل از /owner استفاده کنید.': '👑 Welcome to the owner panel.\nUse /owner to open the panel.', '❌ لینک فایل نامعتبر یا منقضی شده است.': '❌ The file link is invalid or expired.', '❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است.': '❌ The file owner’s subscription has expired or the file is inactive.', '⚠️ برای دریافت فایل ابتدا عضو کانال شوید.': '⚠️ Please join the required channel(s) before receiving the file.', '🗑 فایل حذف شد': '🗑 File deleted', 'لینک دریافت پیدا نشد.': 'Download link not found.', 'فایل دیگر موجود نیست.': 'The file is no longer available.', '⛔ اشتراک شما فعال نیست.': '⛔ Your subscription is not active.', '❌ نوع فایل پشتیبانی نمی\u200cشود.': '❌ This file type is not supported.', 'پنل بسته شد.': 'Panel closed.', '📤 فایل را ارسال کنید.\nفرمت\u200cهای PDF، ZIP، MP4، MP3، عکس، وویس و سایر فایل\u200cها پشتیبانی می\u200cشوند.': '📤 Send the file.\nPDF, ZIP, MP4, MP3, images, voice messages, and other file types are supported.', '⛔ دسترسی ندارید.': '⛔ Access denied.', '📂 هنوز فایلی آپلود نکرده\u200cاید.': '📂 You have not uploaded any files yet.', '📊 آمار شما:\n\n📂 تعداد فایل\u200cها: ': '📊 Your statistics:\n\n📂 Files: ', '\n⬇️ تعداد دانلودها: ': '\n⬇️ Downloads: ', '⛔ ادمین نیستید.': '⛔ You are not an admin.', '💳 وضعیت اشتراک: ': '💳 Subscription status: ', '\n📅 تاریخ پایان: ': '\n📅 Expiration date: ', '🗑 حذف همه کانال\u200cها': '🗑 Delete all channels', 'هیچ ادمینی ثبت نشده است.': 'No admins are registered.', '\n📅 پایان: ': '\n📅 Expires: ', '\n📂 فایل\u200cها: ': '\n📂 Files: ', '\n⬇️ دانلودها: ': '\n⬇️ Downloads: ', '\n📌 وضعیت: ': '\n📌 Status: ', '📊 آمار کلی ربات:\n\n👥 کاربران دریافت\u200cکننده: ': '📊 Global bot statistics:\n\n👥 Users who received files: ', '\n⬇️ کل دانلودها: ': '\n⬇️ Total downloads: ', '\n📂 فایل\u200cهای فعال: ': '\n📂 Active files: ', '\n🛡 تعداد ادمین\u200cها: ': '\n🛡 Admins: ', 'هیچ فایلی وجود ندارد.': 'No files exist.', '\n👤 ادمین: ': '\n👤 Admin: ', '\n⬇️ دانلود: ': '\n⬇️ Downloads: ', '\n📅 تاریخ: ': '\n📅 Date: ', 'دسترسی ندارید.': 'Access denied.', '✅ کپشن فایل ویرایش شد.': '✅ File caption updated.', '✅ کانال اجباری ثبت شد.': '✅ Mandatory channel registered.', '✅ کانال اجباری با موفقیت ثبت شد.': '✅ Mandatory channel added successfully.', '30 روزه': '30 Days', '🛠 شما ادمین هستید.\nبرای ورود به پنل از /panel استفاده کنید.': '🛠 You are an admin.\nUse /panel to open the admin panel.', '✅ عضو شدم': '✅ I joined', '✅ فایل ارسال شد\n⏱ این فایل تا ': '✅ File sent\n⏱ This file will be deleted in ', ' ثانیه دیگر حذف خواهد شد': ' seconds.', '❌ ارسال فایل با خطا مواجه شد.': '❌ Failed to send the file.', 'آیدی عددی کاربر را ارسال کنید.': 'Send the user numeric ID.', 'آیدی عددی ادمین را ارسال کنید.': 'Send the admin numeric ID.', '💰 درآمد کل:\nبرای ثبت درآمد واقعی، درگاه پرداخت باید به ربات متصل شود.\nدر حال حاضر درآمد ثبت\u200cشده: 0': '💰 Total revenue:\nA payment gateway must be connected to record real revenue.\nCurrently recorded revenue: 0', '🗑 حذف': '🗑 Delete', '✏️ ویرایش کپشن': '✏️ Edit caption', '📊 آمار': '📊 Statistics', '✅ شما به عنوان ادمین ربات فعال شدید.\nبرای ورود از /panel استفاده کنید.': '✅ You have been activated as a bot admin.\nUse /panel to open the panel.', 'بدون کپشن': 'No caption', '❌ فرمت ناقص است.': '❌ Incomplete format.', '❌ این ادمین در ربات ثبت نشده است.': '❌ This admin is not registered in the bot.', '❌ اطلاعات کانال ناقص است.': '❌ Incomplete channel information.', 'هنوز در همه کانال\u200cها عضو نشده\u200cاید.': 'You have not joined all required channels yet.', 'عضویت شما قابل بررسی نیست.': 'Your membership could not be verified.', '✅ مدت حذف خودکار روی ': '✅ Auto-delete time set to ', ' ثانیه تنظیم شد.': ' seconds.', '❌ فقط یک عدد مثبت ارسال کنید.': '❌ Send a positive number only.', '⛔ دسترسی ادمینی شما مسدود شد.': '⛔ Your admin access has been blocked.', '❌ ادمین پیدا نشد.': '❌ Admin not found.', '❌ admin_id باید عددی باشد.': '❌ admin_id must be numeric.', '❌ کانال پیدا نشد یا ربات دسترسی لازم ندارد.': '❌ Channel not found or the bot lacks the required access.', '❌ کانال پیدا نشد یا ربات در کانال دسترسی لازم ندارد.': '❌ Channel not found or the bot does not have the required access in the channel.', '📢 ورود به کانال': '📢 Join channel', '❌ آیدی باید عددی باشد.': '❌ The ID must be numeric.', ' مسدود شد.': ' has been blocked.', 'لطفاً لینک فایل را از فرستنده دریافت کنید.': 'Please obtain the file link from the sender.', 'بدون نام': 'Unnamed', '⚠️ اشتراک شما منقضی شده است.\nآپلود فایل و لینک\u200cهای قبلی غیرفعال شدند.': '⚠️ Your subscription has expired.\nFile uploads and previous links have been disabled.', '📊 آمار دانلود': '📊 Download statistics'}
+EN_TEXT_MAP = {'📢 کانال\u200cهای اجباری:\n\n': '📢 Mandatory channels:\n\n', '👥 لیست ادمین\u200cها:\n\n': '👥 Admin list:\n\n', '📂 فایل\u200cهای ثبت\u200cشده:\n\n': '📂 Registered files:\n\n', '📤 آپلود فایل': '📤 Upload file', '📂 فایل\u200cهای من': '📂 My files', '📊 آمار من': '📊 My stats', '📢 مدیریت کانال\u200cها': '📢 Manage channels', '💳 وضعیت اشتراک': '💳 Subscription status', '💎 تمدید / خرید اشتراک': '💎 Buy / Renew subscription', '🎁 اشتراک رایگان ۳ روزه': '🎁 3-Day Free Trial', '🌐 زبان / Language': '🌐 Language', '❌ بستن پنل': '❌ Close panel', '👥 مدیریت ادمین\u200cها': '👥 Manage admins', '➕ افزودن ادمین': '➕ Add admin', '➖ حذف ادمین': '➖ Remove admin', '💰 درآمد': '💰 Revenue', '📊 آمار کل': '📊 Global stats', '📂 همه فایل\u200cها': '📂 All files', '💎 مدیریت اشتراک\u200cها': '💎 Subscription plans', '📢 همه کانال\u200cها': '📢 All channels', '⏱ تنظیم حذف خودکار': '⏱ Auto-delete settings', '🌐 زبان انتخاب شد: فارسی': '🌐 Language selected: Persian', '🌐 زبان را انتخاب کنید / Choose your language:': '🌐 Please choose your language:', 'سلام! 👋\nاین ربات برای دریافت فایل استفاده می\u200cشود.': 'Hello! 👋\nThis bot is used to receive files.', '💎 خرید / تمدید اشتراک': '💎 Buy / Renew subscription', '🎁 دوره آزمایشی رایگان ۳ روزه': '🎁 3-Day Free Trial', '🎁 شما می\u200cتوانید ۳ روز اشتراک رایگان دریافت کنید.': '🎁 You are eligible for a 3-day free trial.', '✅ دوره آزمایشی رایگان شما فعال شد.\n⏳ مدت: ۳ روز\n📅 پایان: {expire}': '✅ Your free trial is now active.\n⏳ Duration: 3 days\n📅 Expires: {expire}', '❌ شما قبلاً از دوره آزمایشی رایگان استفاده کرده\u200cاید.': '❌ You have already used your free trial.', 'ℹ️ شما در حال حاضر یک اشتراک فعال دارید. دوره آزمایشی رایگان برای شما فعال نشد.': 'ℹ️ You already have an active subscription. The free trial was not activated.', '❌ فعال\u200cسازی دوره آزمایشی انجام نشد. لطفاً دوباره تلاش کنید.': '❌ The free trial could not be activated. Please try again.', 'فعلاً هیچ پلن فعالی وجود ندارد.': 'There are no active plans at the moment.', '💎 پلن\u200cهای اشتراک:': '💎 Subscription plans:', '🧾 فاکتور پرداخت در تلگرام برای شما ارسال شد.': '🧾 The payment invoice was sent inside Telegram.', '✅ پرداخت با موفقیت انجام شد و اشتراک شما فعال/تمدید شد.': '✅ Payment completed and your subscription was activated/extended.', '❌ پرداخت ثبت نشد یا اطلاعات پرداخت نامعتبر است.': '❌ Payment could not be registered or the payment information is invalid.', '⛔ فقط مالک به این بخش دسترسی دارد.': '⛔ Owner access only.', '⛔ شما دسترسی ادمین ندارید.': '⛔ You do not have admin access.', '💎 مدیریت پلن\u200cهای اشتراک': '💎 Subscription plan management', '➕ افزودن پلن': '➕ Add plan', '🗑 حذف پلن': '🗑 Delete plan', '📢 همه کانال\u200cهای اجباری': '📢 All mandatory channels', '⏱ تنظیم حذف خودکار برای ادمین': '⏱ Set auto-delete for an admin', '🆔 آیدی عددی ادمین را ارسال کنید.': '🆔 Send the admin numeric ID.', '⏱ زمان حذف خودکار را به ثانیه ارسال کنید.': '⏱ Send the auto-delete time in seconds.', 'فرمت: نام فارسی | نام انگلیسی | تعداد روز | تعداد ستاره | recurring\nمثال: 30 روزه | 30 Days | 30 | 250 | yes': 'Format: Persian name | English name | days | stars | recurring\nExample: 30 Days | 30 Days | 30 | 250 | yes', '✅ پلن با موفقیت اضافه شد.': '✅ Plan added successfully.', '✅ پلن حذف شد.': '✅ Plan deleted.', '❌ اطلاعات پلن نامعتبر است.': '❌ Invalid plan information.', '❌ فقط عدد مثبت ارسال کنید.': '❌ Send a positive number only.', '✅ زمان حذف خودکار ادمین تنظیم شد.': '✅ Admin auto-delete time updated.', 'هیچ کانال اجباری ثبت نشده است.': 'No mandatory channels are registered.', '✅ کانال حذف شد.': '✅ Channel removed.', 'فرمت: admin_id | @channel_username | https://t.me/channel_username': 'Format: admin_id | @channel_username | https://t.me/channel_username', '💳 پشتیبانی پرداخت\n\nاگر از حساب شما Stars کسر شده ولی اشتراک فعال نشده است، رسید پرداخت یا شناسه پرداخت Telegram را برای مالک ربات ارسال کنید.\n\nپرداخت\u200cهای Stars مستقیماً داخل تلگرام انجام می\u200cشوند.': '💳 Payment Support\n\nIf you were charged Stars but your subscription was not activated, please send the payment receipt or Telegram payment charge ID to the bot owner.\n\nTelegram Stars payments are processed inside Telegram.', '🛠 پنل مدیریت ادمین:': '🛠 Admin management panel:', '👑 پنل مالک:': '👑 Owner panel:', 'هیچ کانالی ثبت نشده است.': 'No channels are registered.', 'فایل حذف شد.': 'File deleted.', '🗑 فایل حذف شد و لینک آن غیرفعال گردید.': '🗑 File deleted and its link has been disabled.', '✏️ کپشن جدید را ارسال کنید.\nبرای حذف کپشن، عبارت «بدون کپشن» را ارسال کنید.': '✏️ Send the new caption.\nTo remove the caption, send “No caption”.', '📊 آمار فایل:\n\n📄 نام: ': '📊 File statistics:\n\n📄 Name: ', '\n⬇️ تعداد دانلود: ': '\n⬇️ Downloads: ', '\n📅 تاریخ آپلود: ': '\n📅 Upload date: ', '\n\n👥 آخرین دریافت\u200cکنندگان:\n': '\n\n👥 Recent recipients:\n', 'موردی ثبت نشده است.': 'No records found.', '📢 اطلاعات کانال را در یک خط ارسال کنید:\n\nفرمت پیشنهادی:\n@channel_username | https://t.me/channel_username\n\nربات باید در کانال ادمین باشد.': '📢 Send the channel information in one line:\n\nSuggested format:\n@channel_username | https://t.me/channel_username\n\nThe bot must be an admin in the channel.', 'کانال\u200cها حذف شدند.': 'Channels deleted.', '✅ همه کانال\u200cهای اجباری حذف شدند.': '✅ All mandatory channels have been deleted.', '🇮🇷 فارسی': '🇮🇷 Persian', '➕ افزودن کانال': '➕ Add channel', '👑 به پنل مالک خوش آمدید.\nبرای ورود به پنل از /owner استفاده کنید.': '👑 Welcome to the owner panel.\nUse /owner to open the panel.', '❌ لینک فایل نامعتبر یا منقضی شده است.': '❌ The file link is invalid or expired.', '❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است.': '❌ The file owner’s subscription has expired or the file is inactive.', '⚠️ برای دریافت فایل ابتدا عضو کانال شوید.': '⚠️ Please join the required channel(s) before receiving the file.', '🗑 فایل حذف شد': '🗑 File deleted', 'لینک دریافت پیدا نشد.': 'Download link not found.', 'فایل دیگر موجود نیست.': 'The file is no longer available.', '⛔ اشتراک شما فعال نیست.': '⛔ Your subscription is not active.', '❌ نوع فایل پشتیبانی نمی\u200cشود.': '❌ This file type is not supported.', 'پنل بسته شد.': 'Panel closed.', '📤 فایل را ارسال کنید.\nفرمت\u200cهای PDF، ZIP، MP4، MP3، عکس، وویس و سایر فایل\u200cها پشتیبانی می\u200cشوند.': '📤 Send the file.\nPDF, ZIP, MP4, MP3, images, voice messages, and other file types are supported.', '⛔ دسترسی ندارید.': '⛔ Access denied.', '📂 هنوز فایلی آپلود نکرده\u200cاید.': '📂 You have not uploaded any files yet.', '📊 آمار شما:\n\n📂 تعداد فایل\u200cها: ': '📊 Your statistics:\n\n📂 Files: ', '\n⬇️ تعداد دانلودها: ': '\n⬇️ Downloads: ', '⛔ ادمین نیستید.': '⛔ You are not an admin.', '💳 وضعیت اشتراک: ': '💳 Subscription status: ', '\n📅 تاریخ پایان: ': '\n📅 Expiration date: ', '🗑 حذف همه کانال\u200cها': '🗑 Delete all channels', 'هیچ ادمینی ثبت نشده است.': 'No admins are registered.', '\n📅 پایان: ': '\n📅 Expires: ', '\n📂 فایل\u200cها: ': '\n📂 Files: ', '\n⬇️ دانلودها: ': '\n⬇️ Downloads: ', '\n📌 وضعیت: ': '\n📌 Status: ', '📊 آمار کلی ربات:\n\n👥 کاربران دریافت\u200cکننده: ': '📊 Global bot statistics:\n\n👥 Users who received files: ', '\n⬇️ کل دانلودها: ': '\n⬇️ Total downloads: ', '\n📂 فایل\u200cهای فعال: ': '\n📂 Active files: ', '\n🛡 تعداد ادمین\u200cها: ': '\n🛡 Admins: ', 'هیچ فایلی وجود ندارد.': 'No files exist.', '\n👤 ادمین: ': '\n👤 Admin: ', '\n⬇️ دانلود: ': '\n⬇️ Downloads: ', '\n📅 تاریخ: ': '\n📅 Date: ', 'دسترسی ندارید.': 'Access denied.', '✅ کپشن فایل ویرایش شد.': '✅ File caption updated.', '✅ کانال اجباری ثبت شد.': '✅ Mandatory channel registered.', '✅ کانال اجباری با موفقیت ثبت شد.': '✅ Mandatory channel added successfully.', '30 روزه': '30 Days', '🛠 شما ادمین هستید.\nبرای ورود به پنل از /panel استفاده کنید.': '🛠 You are an admin.\nUse /panel to open the admin panel.', '✅ عضو شدم': '✅ I joined', '✅ فایل ارسال شد\n⏱ این فایل تا ': '✅ File sent\n⏱ This file will be deleted in ', ' ثانیه دیگر حذف خواهد شد': ' seconds.', '❌ ارسال فایل با خطا مواجه شد.': '❌ Failed to send the file.', 'آیدی عددی کاربر را ارسال کنید.': 'Send the user numeric ID.', 'آیدی عددی ادمین را ارسال کنید.': 'Send the admin numeric ID.', '💰 درآمد کل:\nبرای ثبت درآمد واقعی، درگاه پرداخت باید به ربات متصل شود.\nدر حال حاضر درآمد ثبت\u200cشده: 0': '💰 Total revenue:\nA payment gateway must be connected to record real revenue.\nCurrently recorded revenue: 0', '🗑 حذف': '🗑 Delete', '✏️ ویرایش کپشن': '✏️ Edit caption', '📊 آمار': '📊 Statistics', '✅ شما به عنوان ادمین ربات فعال شدید.\nبرای ورود از /panel استفاده کنید.': '✅ You have been activated as a bot admin.\nUse /panel to open the panel.', 'بدون کپشن': 'No caption', '❌ فرمت ناقص است.': '❌ Incomplete format.', '❌ این ادمین در ربات ثبت نشده است.': '❌ This admin is not registered in the bot.', '❌ اطلاعات کانال ناقص است.': '❌ Incomplete channel information.', 'هنوز در همه کانال\u200cها عضو نشده\u200cاید.': 'You have not joined all required channels yet.', 'عضویت شما قابل بررسی نیست.': 'Your membership could not be verified.', '✅ مدت حذف خودکار روی ': '✅ Auto-delete time set to ', ' ثانیه تنظیم شد.': ' seconds.', '❌ فقط یک عدد مثبت ارسال کنید.': '❌ Send a positive number only.', '⛔ دسترسی ادمینی شما مسدود شد.': '⛔ Your admin access has been blocked.', '❌ ادمین پیدا نشد.': '❌ Admin not found.', '❌ admin_id باید عددی باشد.': '❌ admin_id must be numeric.', '❌ کانال پیدا نشد یا ربات دسترسی لازم ندارد.': '❌ Channel not found or the bot lacks the required access.', '❌ کانال پیدا نشد یا ربات در کانال دسترسی لازم ندارد.': '❌ Channel not found or the bot does not have the required access in the channel.', '📢 ورود به کانال': '📢 Join channel', '❌ آیدی باید عددی باشد.': '❌ The ID must be numeric.', ' مسدود شد.': ' has been blocked.', 'لطفاً لینک فایل را از فرستنده دریافت کنید.': 'Please obtain the file link from the sender.', 'بدون نام': 'Unnamed', '⚠️ اشتراک شما منقضی شده است.\nآپلود فایل و لینک\u200cهای قبلی غیرفعال شدند.': '⚠️ Your subscription has expired.\nFile uploads and previous links have been disabled.', '📊 آمار دانلود': '📊 Download statistics',
+'🔐 تعیین رمز': '🔐 Set password',
+'➡️ بدون رمز': '➡️ No password',
+'🔑 تغییر رمز': '🔑 Change password',
+'🔓 حذف رمز': '🔓 Remove password',
+'🔒 این فایل دارای رمز عبور است.': '🔒 This file is password protected.',
+'🔑 رمز عبور را ارسال کنید:': '🔑 Send the file password:',
+'❌ رمز عبور اشتباه است. دوباره تلاش کنید.': '❌ Incorrect password. Please try again.',
+'✅ رمز فایل با موفقیت تنظیم شد.': '✅ File password set successfully.',
+'✅ رمز فایل تغییر کرد.': '✅ File password changed.',
+'✅ رمز فایل حذف شد.': '✅ File password removed.',
+'❌ رمز عبور نمی‌تواند خالی باشد.': '❌ Password cannot be empty.',
+'❌ رمز عبور خیلی کوتاه است. حداقل ۴ کاراکتر وارد کنید.': '❌ Password is too short. Use at least 4 characters.',
+'🔐 این فایل رمز دارد': '🔐 This file is password protected'}
 
 def localize_text(user_id, text):
     """Translate bot-generated Persian UI text for an English-speaking user."""
@@ -259,7 +273,7 @@ user_states = {}
 pending_downloads = {}
 # First-time /start flow: language must be selected before continuing.
 pending_start_tokens = {}
-# After a file is delivered, a new user can choose language without blocking delivery.
+# Used only for compatibility with the post-file language flow.
 pending_post_file_language = set()
 
 def now_text():
@@ -324,6 +338,7 @@ def init_database():
                     file_type TEXT NOT NULL,
                     caption TEXT,
                     token TEXT UNIQUE NOT NULL,
+                    password_hash TEXT,
                     downloads INTEGER NOT NULL DEFAULT 0,
                     upload_date TEXT NOT NULL,
                     deleted INTEGER NOT NULL DEFAULT 0
@@ -401,6 +416,9 @@ def init_database():
                     PRIMARY KEY (file_id, channel_id)
                 )
             """)
+
+            # Password support migration for existing installations.
+            cursor.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS password_hash TEXT")
 
             # Performance indexes for the most frequent bot queries.
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_token_active ON files(token, deleted)")
@@ -504,6 +522,52 @@ def inline_button(text, callback_data):
 
 def clear_state(user_id):
     user_states.pop(user_id, None)
+
+
+def hash_file_password(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def verify_file_password(password, password_hash):
+    if not password_hash:
+        return True
+    return secrets.compare_digest(hash_file_password(password), password_hash)
+
+
+def password_keyboard(user_id):
+    kb = types.InlineKeyboardMarkup()
+    if get_language(user_id) == "en":
+        kb.row(
+            types.InlineKeyboardButton("🔐 Set password", callback_data="set_password_yes"),
+            types.InlineKeyboardButton("➡️ No password", callback_data="set_password_no")
+        )
+    else:
+        kb.row(
+            types.InlineKeyboardButton("🔐 تعیین رمز", callback_data="set_password_yes"),
+            types.InlineKeyboardButton("➡️ بدون رمز", callback_data="set_password_no")
+        )
+    return kb
+
+
+def file_password_management_keyboard(user_id, has_password):
+    kb = types.InlineKeyboardMarkup()
+    if get_language(user_id) == "en":
+        if has_password:
+            kb.row(
+                types.InlineKeyboardButton("🔑 Change password", callback_data="change_password:"),
+                types.InlineKeyboardButton("🔓 Remove password", callback_data="remove_password:")
+            )
+        else:
+            kb.add(types.InlineKeyboardButton("🔐 Set password", callback_data="set_file_password:"))
+    else:
+        if has_password:
+            kb.row(
+                types.InlineKeyboardButton("🔑 تغییر رمز", callback_data="change_password:"),
+                types.InlineKeyboardButton("🔓 حذف رمز", callback_data="remove_password:")
+            )
+        else:
+            kb.add(types.InlineKeyboardButton("🔐 تعیین رمز", callback_data="set_file_password:"))
+    return kb
 
 
 def safe_send(chat_id, text, **kwargs):
@@ -707,11 +771,15 @@ def ensure_default_plan():
             INSERT INTO subscription_plans
             (name_fa, name_en, days, stars, recurring, active, created_at)
             VALUES (?, ?, ?, ?, ?, TRUE, ?)
-        """, ("30 روزه", "30 Days", 30, 250, True, now_text()), commit=True)
+        """, ("اشتراک ماهیانه", "Monthly Subscription", 30, 250, True, now_text()), commit=True)
 
 def send_subscription_plans(chat_id, user_id):
     ensure_default_plan()
     plans = execute("SELECT * FROM subscription_plans WHERE active=TRUE ORDER BY days, stars", fetchall=True)
+
+    # The normal user subscription screen contains:
+    # - the monthly paid plan (30 days by default)
+    # - the one-time 3-day free trial, while the user is eligible.
     if not plans and has_used_free_trial(user_id):
         bot.send_message(chat_id, tr(user_id, "no_plans"))
         return
@@ -719,6 +787,7 @@ def send_subscription_plans(chat_id, user_id):
     text = tr(user_id, "plans")
     if not has_used_free_trial(user_id) and not is_admin(user_id) and not is_owner(user_id):
         text += "\n\n" + tr(user_id, "trial_available")
+
     bot.send_message(chat_id, text, reply_markup=plans_keyboard(user_id))
 
 def activate_paid_subscription(user_id, plan, payment):
@@ -773,17 +842,18 @@ def language_callback(call):
     except Exception:
         pass
 
-    # File delivery no longer waits for language. This set is only used to
-    # continue the existing post-file language flow.
-    if user_id in pending_post_file_language:
-        pending_post_file_language.discard(user_id)
-        send_subscription_plans(call.message.chat.id, user_id)
-        return
-
-    # Backward-compatible pending token handling for any old in-memory state.
+    # If the user arrived through a file link, language selection is step 1.
+    # Continue with step 2 only after the language has been selected.
     pending_token = pending_start_tokens.pop(user_id, None)
     if pending_token:
         request_file(call.message, pending_token)
+        return
+
+    # If a previous flow was waiting for language after file delivery,
+    # continue with the subscription screen as the next step.
+    if user_id in pending_post_file_language:
+        pending_post_file_language.discard(user_id)
+        send_subscription_plans(call.message.chat.id, user_id)
         return
 
     # Language is now selected; show the normal home flow in that language.
@@ -1121,11 +1191,14 @@ def paysupport_handler(message):
 
 @bot.message_handler(commands=["start"])
 def start_handler(message):
-    """Single entry point for Telegram deep links and normal /start.
+    """Main entry point with the required priority:
 
-    FILE DEEP LINK HAS ABSOLUTE PRIORITY:
-    /start file_TOKEN -> file lookup -> mandatory channels -> membership -> file.
-    Recipient language/subscription/menu are NEVER checked before that flow.
+    1) Language selection
+    2) If this is a file deep-link: mandatory channels -> file delivery
+    3) Subscription plans (monthly + 3-day free trial)
+
+    For a normal /start without a file link, regular users go from language
+    directly to the subscription screen.
     """
     user_id = message.from_user.id
     raw_text = (message.text or "").strip()
@@ -1143,14 +1216,15 @@ def start_handler(message):
 
     print(f"START ROUTE | user_id={user_id} | raw={raw_text!r} | token={token!r}")
 
-    if token:
-        # IMPORTANT: return immediately. Nothing about the recipient's
-        # language/subscription is allowed to run before request_file().
-        request_file(message, token)
-        return
-
-    # Normal /start retains the existing language/admin/subscription behavior.
+    # LANGUAGE ALWAYS COMES BEFORE THE FILE FLOW.
+    # If a file deep-link was used before the user selected a language,
+    # remember the token and continue with the exact same file after selection.
     if not has_language(user_id):
+        if token:
+            pending_start_tokens[user_id] = token
+        else:
+            pending_start_tokens.pop(user_id, None)
+
         bot.send_message(
             message.chat.id,
             "🌐 زبان را انتخاب کنید / Please choose your language:",
@@ -1158,6 +1232,13 @@ def start_handler(message):
         )
         return
 
+    # Language is already known. A file deep-link now starts:
+    # mandatory channels -> membership check -> file -> subscription.
+    if token:
+        request_file(message, token)
+        return
+
+    # Normal /start without a file link.
     if is_owner(user_id):
         bot.send_message(
             message.chat.id,
@@ -1171,12 +1252,9 @@ def start_handler(message):
             reply_markup=admin_keyboard(user_id)
         )
     else:
-        bot.send_message(
-            message.chat.id,
-            tr(user_id, "welcome") + "\n\n" +
-            ("لطفاً لینک فایل را از فرستنده دریافت کنید." if get_language(user_id) == "fa"
-             else "Please obtain the file link from the sender.")
-        )
+        # No file requested -> go directly to subscription.
+        # send_subscription_plans shows both the monthly paid plan and,
+        # when eligible, the one-time 3-day free trial.
         send_subscription_plans(message.chat.id, user_id)
 
 @bot.message_handler(commands=["panel"])
@@ -1330,7 +1408,18 @@ def request_file(message, token):
         )
         return
 
-    # Already a member: deliver immediately.
+    # Already a member: password-protected files require the password first.
+    if file_row.get("password_hash"):
+        user_states[user_id] = {
+            "action": "verify_file_password",
+            "file_token": token
+        }
+        bot.send_message(
+            message.chat.id,
+            "🔒 این فایل دارای رمز عبور است.\n\n🔑 رمز عبور را ارسال کنید:"
+        )
+        return
+
     send_file_to_user(message.chat.id, message.from_user, file_row)
 
 
@@ -1505,6 +1594,17 @@ def check_join_callback(call):
         bot.send_message(call.message.chat.id, "❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است.")
         return
 
+    if file_row.get("password_hash"):
+        user_states[user_id] = {
+            "action": "verify_file_password",
+            "file_token": token
+        }
+        bot.send_message(
+            call.message.chat.id,
+            "🔒 این فایل دارای رمز عبور است.\n\n🔑 رمز عبور را ارسال کنید:"
+        )
+        return
+
     send_file_to_user(call.message.chat.id, call.from_user, file_row)
 
 
@@ -1577,8 +1677,8 @@ def upload_handler(message):
     file_db_id = execute(
         """
         INSERT INTO files
-        (admin_id, file_id, file_name, file_type, caption, token, upload_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (admin_id, file_id, file_name, file_type, caption, token, password_hash, upload_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1588,6 +1688,7 @@ def upload_handler(message):
             file_type,
             caption,
             token,
+            None,
             now_text()
         ),
         commit=True
@@ -1596,15 +1697,21 @@ def upload_handler(message):
     username = bot.get_me().username
     link = f"https://t.me/{username}?start=file_{token}"
 
-    clear_state(user_id)
+    user_states[user_id] = {
+        "action": "choose_file_password",
+        "file_id": file_db_id,
+        "file_name": file_name,
+        "link": link
+    }
 
     bot.send_message(
         message.chat.id,
         f"✅ فایل ذخیره شد.\n\n"
         f"📄 نام: <code>{html.escape(file_name)}</code>\n"
         f"🔗 لینک اختصاصی:\n{link}\n\n"
-        f"🆔 شناسه فایل: {file_db_id}",
-        reply_markup=admin_keyboard(user_id)
+        f"🆔 شناسه فایل: {file_db_id}\n\n"
+        f"🔐 آیا می‌خواهید برای این فایل رمز عبور تعیین کنید؟",
+        reply_markup=password_keyboard(user_id)
     )
 
 
@@ -1788,7 +1895,8 @@ def show_admin_files(message):
             f"📄 <b>{html.escape(item['file_name'] or 'بدون نام')}</b>\n"
             f"⬇️ دانلود: {item['downloads']}\n"
             f"📅 آپلود: {item['upload_date']}\n"
-            f"🔗 توکن: <code>{item['token']}</code>",
+            f"🔗 توکن: <code>{item['token']}</code>\n"
+            f"{'🔐 این فایل رمز دارد' if item.get('password_hash') else '🔓 بدون رمز'}",
             reply_markup=types.InlineKeyboardMarkup(
                 keyboard=[
                     [
@@ -1799,6 +1907,12 @@ def show_admin_files(message):
                         types.InlineKeyboardButton(
                             "✏️ ویرایش کپشن",
                             callback_data=f"edit_caption:{item['id']}"
+                        )
+                    ],
+                    [
+                        types.InlineKeyboardButton(
+                            "🔐 رمز فایل" if item.get("password_hash") else "🔓 بدون رمز / تعیین رمز",
+                            callback_data=f"file_password_menu:{item['id']}"
                         )
                     ],
                     [
@@ -2001,7 +2115,8 @@ def show_all_files(message):
             f"📄 {item['file_name']}\n"
             f"👤 ادمین: {item['name'] or item['admin_id']}\n"
             f"⬇️ دانلود: {item['downloads']}\n"
-            f"📅 تاریخ: {item['upload_date']}\n\n"
+            f"📅 تاریخ: {item['upload_date']}\n"
+            f"{'🔐 دارای رمز' if item.get('password_hash') else '🔓 بدون رمز'}\n\n"
         )
         kb = types.InlineKeyboardMarkup()
         kb.row(
@@ -2205,6 +2320,114 @@ def edit_caption_callback(call):
     )
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("set_password_"))
+def set_password_choice_callback(call):
+    user_id = call.from_user.id
+    state = user_states.get(user_id, {})
+    if state.get("action") != "choose_file_password":
+        bot.answer_callback_query(call.id, "❌ این درخواست منقضی شده است.", show_alert=True)
+        return
+
+    file_id = int(state["file_id"])
+    file_row = execute("SELECT * FROM files WHERE id = ?", (file_id,), fetchone=True)
+    if not file_row or (file_row["admin_id"] != user_id and not is_owner(user_id)):
+        clear_state(user_id)
+        bot.answer_callback_query(call.id, "⛔ دسترسی ندارید.", show_alert=True)
+        return
+
+    choice = call.data.rsplit("_", 1)[1]
+    if choice == "no":
+        execute("UPDATE files SET password_hash = NULL WHERE id = ?", (file_id,), commit=True)
+        clear_state(user_id)
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            call.message.chat.id,
+            "🔓 فایل بدون رمز ذخیره شد.",
+            reply_markup=owner_keyboard(user_id) if is_owner(user_id) else admin_keyboard(user_id)
+        )
+        return
+
+    user_states[user_id] = {
+        "action": "set_file_password",
+        "file_id": file_id
+    }
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        call.message.chat.id,
+        "🔑 رمز عبور فایل را ارسال کنید:\n\n"
+        "حداقل ۴ کاراکتر."
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("file_password_menu:"))
+def file_password_menu_callback(call):
+    user_id = call.from_user.id
+    file_id = int(call.data.split(":")[1])
+    file_row = execute("SELECT * FROM files WHERE id = ?", (file_id,), fetchone=True)
+
+    if not file_row or (file_row["admin_id"] != user_id and not is_owner(user_id)):
+        bot.answer_callback_query(call.id, "⛔ دسترسی ندارید.", show_alert=True)
+        return
+
+    kb = types.InlineKeyboardMarkup()
+    if file_row.get("password_hash"):
+        if get_language(user_id) == "en":
+            kb.row(
+                types.InlineKeyboardButton("🔑 Change password", callback_data=f"change_password:{file_id}"),
+                types.InlineKeyboardButton("🔓 Remove password", callback_data=f"remove_password:{file_id}")
+            )
+        else:
+            kb.row(
+                types.InlineKeyboardButton("🔑 تغییر رمز", callback_data=f"change_password:{file_id}"),
+                types.InlineKeyboardButton("🔓 حذف رمز", callback_data=f"remove_password:{file_id}")
+            )
+        status = "🔐 این فایل در حال حاضر رمز دارد."
+    else:
+        if get_language(user_id) == "en":
+            kb.add(types.InlineKeyboardButton("🔐 Set password", callback_data=f"change_password:{file_id}"))
+            status = "🔓 This file currently has no password."
+        else:
+            kb.add(types.InlineKeyboardButton("🔐 تعیین رمز", callback_data=f"change_password:{file_id}"))
+            status = "🔓 این فایل در حال حاضر بدون رمز است."
+
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, status, reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("change_password:"))
+def change_password_callback(call):
+    user_id = call.from_user.id
+    file_id = int(call.data.split(":")[1])
+    file_row = execute("SELECT * FROM files WHERE id = ?", (file_id,), fetchone=True)
+
+    if not file_row or (file_row["admin_id"] != user_id and not is_owner(user_id)):
+        bot.answer_callback_query(call.id, "⛔ دسترسی ندارید.", show_alert=True)
+        return
+
+    user_states[user_id] = {"action": "set_file_password", "file_id": file_id}
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, "🔑 رمز جدید فایل را ارسال کنید:\n\nحداقل ۴ کاراکتر.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("remove_password:"))
+def remove_password_callback(call):
+    user_id = call.from_user.id
+    file_id = int(call.data.split(":")[1])
+    file_row = execute("SELECT * FROM files WHERE id = ?", (file_id,), fetchone=True)
+
+    if not file_row or (file_row["admin_id"] != user_id and not is_owner(user_id)):
+        bot.answer_callback_query(call.id, "⛔ دسترسی ندارید.", show_alert=True)
+        return
+
+    execute("UPDATE files SET password_hash = NULL WHERE id = ?", (file_id,), commit=True)
+    bot.answer_callback_query(call.id, "✅ رمز فایل حذف شد.")
+    bot.send_message(
+        call.message.chat.id,
+        "✅ رمز فایل حذف شد.",
+        reply_markup=owner_keyboard(user_id) if is_owner(user_id) else admin_keyboard(user_id)
+    )
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("file_stats:"))
 def file_stats_callback(call):
     admin_id = call.from_user.id
@@ -2300,6 +2523,60 @@ def process_state(message, state):
     user_id = message.from_user.id
     action = state.get("action")
     text = message.text.strip()
+
+    if action == "verify_file_password":
+        token = state.get("file_token")
+        file_row = execute(
+            "SELECT * FROM files WHERE token = ? AND deleted = 0",
+            (token,),
+            fetchone=True
+        )
+
+        if not file_row:
+            clear_state(user_id)
+            bot.send_message(message.chat.id, "❌ فایل دیگر موجود نیست.")
+            return
+
+        owner_id = int(file_row["admin_id"])
+        if owner_id != OWNER_ID and not is_admin(owner_id):
+            clear_state(user_id)
+            bot.send_message(message.chat.id, "❌ اشتراک صاحب این فایل منقضی شده یا فایل غیرفعال است.")
+            return
+
+        if verify_file_password(text, file_row.get("password_hash")):
+            clear_state(user_id)
+            send_file_to_user(message.chat.id, message.from_user, file_row)
+        else:
+            bot.send_message(
+                message.chat.id,
+                "❌ رمز عبور اشتباه است. دوباره تلاش کنید."
+            )
+        return
+
+    if action == "set_file_password":
+        if len(text) < 4:
+            bot.send_message(message.chat.id, "❌ رمز عبور خیلی کوتاه است. حداقل ۴ کاراکتر وارد کنید.")
+            return
+
+        file_id = state.get("file_id")
+        file_row = execute("SELECT * FROM files WHERE id = ?", (file_id,), fetchone=True)
+        if not file_row or (file_row["admin_id"] != user_id and not is_owner(user_id)):
+            clear_state(user_id)
+            bot.send_message(message.chat.id, "⛔ دسترسی ندارید.")
+            return
+
+        execute(
+            "UPDATE files SET password_hash = ? WHERE id = ?",
+            (hash_file_password(text), file_id),
+            commit=True
+        )
+        clear_state(user_id)
+        bot.send_message(
+            message.chat.id,
+            "✅ رمز فایل با موفقیت تنظیم شد.",
+            reply_markup=owner_keyboard(user_id) if is_owner(user_id) else admin_keyboard(user_id)
+        )
+        return
 
     if action == "edit_caption":
         caption = "" if text == "بدون کپشن" else text
